@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- Local terminals: `install.sh --local` shows the screen in every new tab or window of Konsole, GNOME Terminal, kitty... (once per terminal, not in subshells, tmux, IDE terminals or after `sudo -s`); `SHOW` in the configuration, and per user in `~/.config/simple-motd.conf` (with `THEME`).
+- Docker part: version, swarm role and nodes, containers (running, stopped, paused, unhealthy), images, volumes, networks, stacks (or compose projects); `DOCKER=auto|off`.
+- The screen fits narrow terminals (header, bars, long lines cut).
+- Labels 10 characters wide.
+- A new run of `install.sh` appends the configuration keys added since, with their comments.
+
 ## 0.3.0
 
 - System: one line per physical disk (size, NVMe/SSD/HDD/virtual, model), one line per GPU.

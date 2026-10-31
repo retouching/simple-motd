@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- System: one line per physical disk (size, NVMe/SSD/HDD/virtual, model), one line per GPU.
+- Usage: one VRAM line per card that reports it, one disk line per local file system (with its mount point), `DISKS` and `MAX_DISKS` in the configuration.
+- SSH, journal mode: a journald set to `Storage=none` sends the count to auth.log / secure even when older journal files remain.
+
 ## 0.2.0
 
 - Arch Linux: updates from `checkupdates` (pacman-contrib), security from `arch-audit`, `--ssh private` with an sshd unit that has no option variable.

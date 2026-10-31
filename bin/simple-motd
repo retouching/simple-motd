@@ -7,6 +7,7 @@
 #   simple-motd status          where the data comes from, cache age, timer state
 #   simple-motd version
 set -u
+shopt -s extglob
 
 VERSION=0.2.0
 CONF=${SIMPLE_MOTD_CONF:-/etc/simple-motd.conf}
@@ -19,6 +20,8 @@ THEMES="pink blue green orange"
 THEME=pink
 SSH_MODE=journal
 WIDTH=66
+DISKS=""        # mount points to show; empty: every local data file system
+MAX_DISKS=6
 [[ -r $CONF ]] && . "$CONF"
 THEME=${SIMPLE_MOTD_THEME:-$THEME}   # one-off override (install.sh previews)
 
@@ -27,6 +30,7 @@ THEME=${SIMPLE_MOTD_THEME:-$THEME}   # one-off override (install.sh previews)
 # ---------------------------------------------------------------------------
 
 q() { printf '%q' "$1"; }
+qa() { local x; printf '('; for x in "$@"; do printf '%q ' "$x"; done; printf ')'; }   # array
 
 pkg_manager() {
   if command -v apt-get >/dev/null 2>&1 && [[ -d /var/lib/dpkg ]]; then echo apt
@@ -128,7 +132,9 @@ ssh_from_journal() { # appends to $1; returns 1 when the journal has nothing for
   local out unit cursor cur_file=$LIB_DIR/journal.cursor args=()
   command -v journalctl >/dev/null 2>&1 || return 1
   unit=$(ssh_unit); [[ -n $unit ]] || return 1
-  # No entry at all for the unit (not even its start): the journal is not kept, use the files.
+  # journald told to keep nothing, or no entry at all for the unit (not even its start):
+  # the journal is not kept, use the files.
+  systemd-analyze cat-config systemd/journald.conf 2>/dev/null | grep -qiE '^[[:space:]]*Storage[[:space:]]*=[[:space:]]*none' && return 1
   [[ -n $(journalctl -q --no-pager -u "$unit" -n 1 2>/dev/null) ]] || return 1
   if [[ -s $cur_file ]]; then args=(--after-cursor "$(<"$cur_file")")
   else args=(--since "-24h"); fi
@@ -212,25 +218,45 @@ collect_system() {
           s=s" | "mods"/"slots" DIMM"; if (mf != "") s=s" | "mf
           print s v }')
 
-  gpu=""; vram_total=""; vram_used=""
-  local slot
-  slot=$(lspci 2>/dev/null | awk '/VGA|3D controller|Display controller/{print $1; exit}')
-  if [[ -n $slot ]]; then
-    gpu=$(lspci -s "$slot" | sed -E 's/^[0-9a-f:.]+ [^:]+: //; s/ Corporation| Technologies| Inc\.?|\[|\]//g; s/ \(rev [0-9a-f]+\)//; s/ +/ /g')
-    local sys=/sys/bus/pci/devices/0000:$slot vt vu
-    if command -v nvidia-smi >/dev/null 2>&1 \
-       && read -r vt vu < <(nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ,); then
-      vram_total=$((vt * 1024)); vram_used=$((vu * 1024))
+  # Physical disks only: no partition, volume (LVM, RAID, dm), loop, zram or optical drive.
+  drives=()
+  local dname dsize drota dtran dtype dmodel kind
+  while IFS="|" read -r dname dsize drota dtran dtype dmodel; do
+    [[ $dtype == disk && $dname != @(loop|ram|zram|nbd|md|dm-)* ]] || continue
+    (( dsize > 0 )) || continue
+    if [[ -n $virt_tag && ( $dname == vd* || $dname == xvd* || $dmodel == *@(QEMU|VBOX|Virtual|VMware)* ) ]]; then kind=virtual
+    elif [[ $dtran == nvme || $dname == nvme* ]]; then kind=NVMe
+    elif [[ $drota == 1 ]]; then kind=HDD
+    else kind=SSD; fi
+    [[ $dtran == usb ]] && kind+=" USB"
+    dmodel=$(sed -E 's/_/ /g; s/ +/ /g; s/^ //; s/ $//' <<< "$dmodel")
+    drives+=("$(awk -v b="$dsize" 'BEGIN{ if (b>=1e12) printf "%.3g TB", b/1e12; else printf "%.3g GB", b/1e9 }') $kind${dmodel:+ | $dmodel}")
+  done < <(lsblk -dn -b -P -o NAME,SIZE,ROTA,TRAN,TYPE,MODEL 2>/dev/null \
+           | sed -E 's/^NAME="([^"]*)" SIZE="([^"]*)" ROTA="([^"]*)" TRAN="([^"]*)" TYPE="([^"]*)" MODEL="([^"]*)" *$/\1|\2|\3|\4|\5|\6/')
+
+  # Every display controller: one entry per card, in lspci order (integrated and discrete).
+  gpus=(); vram_total=(); vram_used=(); gpu_short=()
+  local slot name sys vt vu total used nv=""
+  command -v nvidia-smi >/dev/null 2>&1 \
+    && nv=$(nvidia-smi --query-gpu=pci.bus_id,memory.total,memory.used --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
+  while read -r slot; do
+    [[ -n $slot ]] || continue
+    name=$(lspci -s "$slot" | sed -E 's/^[0-9a-f:.]+ [^:]+: //; s/ Corporation| Technologies| Inc\.?|\[|\]//g; s/ \(rev [0-9a-f]+\)//; s/ +/ /g')
+    sys=/sys/bus/pci/devices/$slot total="" used=""
+    # nvidia-smi names the card by its PCI address (00000000:01:00.0): match the end of it.
+    if [[ -n $nv ]] && IFS=, read -r _ vt vu < <(grep -i -- "${slot#*:}," <<< "$nv" | head -1); then
+      total=$((vt * 1024)); used=$((vu * 1024))
     elif [[ -r $sys/mem_info_vram_total ]]; then
-      vram_total=$(( $(<"$sys/mem_info_vram_total") / 1024 ))
-      vram_used=$(( $(<"$sys/mem_info_vram_used") / 1024 ))
+      total=$(( $(<"$sys/mem_info_vram_total") / 1024 )); used=$(( $(<"$sys/mem_info_vram_used") / 1024 ))
     else
-      vram_total=$(lspci -v -s "$slot" 2>/dev/null | sed -nE 's/.*[^-]prefetchable\) \[size=([0-9]+)([MG])\].*/\1 \2/p' | head -1 \
-                   | awk '{print ($2=="G" ? $1*1048576 : $1*1024)}')
+      total=$(lspci -v -s "$slot" 2>/dev/null | sed -nE 's/.*[^-]prefetchable\) \[size=([0-9]+)([MG])\].*/\1 \2/p' | head -1 \
+              | awk '{print ($2=="G" ? $1*1048576 : $1*1024)}')
     fi
-    [[ -n $vram_total ]] && gpu+=" | $(awk -v k="$vram_total" 'BEGIN{ if (k>=1048576) printf "%g GB", k/1048576; else printf "%g MB", k/1024 }') VRAM"
-    gpu+=$virt_tag
-  fi
+    [[ -n $total ]] && name+=" | $(awk -v k="$total" 'BEGIN{ if (k>=1048576) printf "%g GB", k/1048576; else printf "%g MB", k/1024 }') VRAM"
+    gpus+=("$name$virt_tag"); vram_total+=("$total"); vram_used+=("$used")
+    gpu_short+=("$(sed -E 's/ \|.*//; s/^(NVIDIA|Advanced Micro Devices|AMD|ATI|Intel|Matrox|ASPEED)( ?\/? ?(ATI|AMD))? //; s/^(GeForce|Radeon) //' <<< "$name")")
+  done < <(lspci -D 2>/dev/null | awk '/VGA|3D controller|Display controller/{print $1}')
+
 }
 
 collect_cpu_busy() {
@@ -255,8 +281,9 @@ cmd_collect() {
   local tmp; tmp=$(mktemp "$RUN_DIR/.state.XXXXXX")
   {
     echo "os=$(q "$os")"; echo "cpu=$(q "$cpu")"; echo "ncpu=$ncpu"
-    echo "ram=$(q "$ram")"; echo "gpu=$(q "$gpu")"
-    echo "vram_total=$vram_total"; echo "vram_used=$vram_used"; echo "cpu_busy=$cpu_busy"
+    echo "ram=$(q "$ram")"; echo "cpu_busy=$cpu_busy"
+    echo "drives=$(qa "${drives[@]}")"; echo "gpus=$(qa "${gpus[@]}")"; echo "gpu_short=$(qa "${gpu_short[@]}")"
+    echo "vram_total=$(qa "${vram_total[@]}")"; echo "vram_used=$(qa "${vram_used[@]}")"
     echo "pm=$pm"; echo "upd=$upd"; echo "sec=$sec"; echo "last_run=$(q "$last_run")"
     echo "ssh_source=$ssh_source"; echo "ssh_ok=$ssh_ok"; echo "ssh_fail=$ssh_fail"
     echo "stamp=$now"
@@ -267,6 +294,21 @@ cmd_collect() {
 # ---------------------------------------------------------------------------
 # show
 # ---------------------------------------------------------------------------
+
+# Mount points to show, as "<mount> <size KB> <used KB>" lines: DISKS when set, else every local
+# data file system (/ first, then by path). df -l: network mounts are never touched at login.
+disk_list() {
+  if [[ -n $DISKS ]]; then
+    local m
+    for m in $DISKS; do df -kP "$m" 2>/dev/null | awk -v m="$m" 'NR==2 {print m, $2, $3}'; done
+    return
+  fi
+  { df -kP / | awk 'NR==2 {print $1, "/", $2, $3}'
+    df -lkPT 2>/dev/null | awk 'NR>1 && $2 ~ /^(ext[234]|xfs|btrfs|zfs|f2fs|bcachefs|jfs|reiserfs|ntfs3?|exfat|fuseblk)$/ \
+      && $7 !~ /^\/(boot|efi|etc|snap|run|dev|sys|proc|tmp|var\/lib\/(docker|containers|snapd))(\/|$)/ {print $1, $7, $3, $4}' | sort -k2,2
+  } | awk '{ dev = $1; if (dev !~ /^\//) sub(/\/.*/, "", dev) }   # ZFS: pool/dataset -> pool
+          !seen[dev]++ && !mnt[$2]++ { print $2, $3, $4 }'
+}
 
 theme_colors() { # accent, titles, labels (256-colour palette)
   case $1 in
@@ -281,10 +323,11 @@ cmd_show() {
   local state=$RUN_DIR/state
   [[ ! -r $state && $EUID -eq 0 ]] && cmd_collect 2>/dev/null
   # Values from the cache (defaults first, the file may be missing).
-  local os="" cpu="" ncpu="" ram="" gpu="" vram_total="" vram_used="" cpu_busy="" pm="" upd=0 sec=0
+  local os="" cpu="" ncpu="" ram="" cpu_busy="" pm="" upd=0 sec=0
+  local -a drives=() gpus=() gpu_short=() vram_total=() vram_used=() demo_disks=()
   local last_run="" ssh_source=off ssh_ok=0 ssh_fail=0 stamp=0
   # demo_* values replace the live ones: only set by share/demo/state, for the previews.
-  local demo_uptime="" demo_load="" demo_mem="" demo_swap="" demo_disk=""
+  local demo_uptime="" demo_load="" demo_mem="" demo_swap=""
   [[ -r $state ]] && . "$state"
 
   local a h l
@@ -325,7 +368,9 @@ cmd_show() {
   row uptime "$TXT$uptxt$R$SEP${DIM}booted $(date -d "@$((now - up))" '+%Y-%m-%d %H:%M')$R"
   row cpu "$(fmt "${cpu:-?}")"
   [[ -n $ram ]] && row ram "$(fmt "$ram")"
-  [[ -n $gpu ]] && row gpu "$(fmt "$gpu")"
+  local i
+  for i in "${!drives[@]}"; do row disk "$(fmt "${drives[i]}")"; done
+  for i in "${!gpus[@]}"; do row gpu "$(fmt "${gpus[i]}")"; done
   echo
 
   # usage
@@ -344,17 +389,29 @@ cmd_show() {
   [[ -n $demo_swap ]] && read -r st sf <<< "$demo_swap"
   mu=$((mt - ma)); mp=$(pct "$mu" "$mt")
   row memory "$(bar "$mp") $TXT$(hb "$mu") / $(hb "$mt")$R ${DIM}($mp%)$R"
-  if [[ -n $vram_used && -n $vram_total ]]; then
-    local vp; vp=$(pct "$vram_used" "$vram_total")
-    row vram "$(bar "$vp") $TXT$(hb "$vram_used") / $(hb "$vram_total")$R ${DIM}($vp%)$R"
-  fi
+  # One vram line per card that tells its use; named when there are several.
+  local vp nv=0
+  for i in "${!vram_used[@]}"; do [[ -n ${vram_used[i]} ]] && nv=$((nv + 1)); done
+  for i in "${!vram_used[@]}"; do
+    [[ -n ${vram_used[i]} && -n ${vram_total[i]} ]] || continue
+    vp=$(pct "${vram_used[i]}" "${vram_total[i]}")
+    row vram "$(bar "$vp") $TXT$(hb "${vram_used[i]}") / $(hb "${vram_total[i]}")$R ${DIM}($vp%)$R$( ((nv > 1)) && printf ' %s%s%s' "$DIM" "${gpu_short[i]}" "$R")"
+  done
   if (( st > 0 )); then su=$((st - sf)); sp=$(pct "$su" "$st"); row swap "$(bar "$sp") $TXT$(hb "$su") / $(hb "$st")$R ${DIM}($sp%)$R"
   else row swap "$(bar 0) ${DIM}disabled$R"; fi
-  local dt du dp
-  read -r _ dt du _ < <(df -kP / | tail -1)
-  [[ -n $demo_disk ]] && read -r dt du <<< "$demo_disk"
-  dp=$(pct "$du" "$dt")
-  row disk "$(bar "$dp") $TXT$(hb "$du") / $(hb "$dt")$R ${DIM}($dp%)$R"
+  # Disks: every local file system that holds data, one line each, / first; the same
+  # device (btrfs subvolumes, bind mounts, ZFS datasets of one pool) counted once.
+  local line mnt dt du dp n=0 more=0
+  local -a disks
+  if (( ${#demo_disks[@]} )); then disks=("${demo_disks[@]}")
+  else mapfile -t disks < <(disk_list); fi
+  for line in "${disks[@]}"; do
+    read -r mnt dt du <<< "$line"
+    if (( n >= MAX_DISKS )); then more=$((more + 1)); continue; fi
+    dp=$(pct "$du" "$dt"); n=$((n + 1))
+    row disk "$(bar "$dp") $TXT$(hb "$du") / $(hb "$dt")$R ${DIM}($dp%) $mnt$R"
+  done
+  (( more )) && printf '    %s+%s more (MAX_DISKS=%s)%s\n' "$DIM" "$more" "$MAX_DISKS" "$R"
   echo
 
   # security

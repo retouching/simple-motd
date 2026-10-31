@@ -6,7 +6,7 @@
 THEME=pink        # pink, blue, green or orange (the screen and the prompt)
 SHOW="ssh"        # "ssh", or "ssh local" for every new local terminal too (install.sh --local)
 SSH_MODE=journal  # journal, private or off
-WIDTH=66          # width of the header line, in columns
+WIDTH=66          # lines of dashes when the terminal's width is unknown (else the whole terminal)
 DISKS=""          # mount points in the usage part; empty: every local data file system
 MAX_DISKS=6       # at most this many disk lines, the others counted on one line
 DOCKER=auto       # the docker part when docker is installed, or off

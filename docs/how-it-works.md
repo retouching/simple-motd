@@ -66,7 +66,7 @@ When the `docker` command exists (and `DOCKER` is not `off`), the timer asks the
 
 ## Width
 
-In a terminal narrower than `WIDTH` (its size from `stty`, else `COLUMNS`), the header takes the terminal's width, the bars shrink (down to 6 characters) and each line longer than the terminal is cut with `...`, colours kept.
+The lines of dashes at the top (around `user@host`) and at the bottom take the whole width of the terminal (its size from `stty`, else `COLUMNS`; `WIDTH` when neither is known). In a narrow terminal the bars shrink (down to 6 characters) and each line longer than the terminal is cut with `...`, colours kept.
 
 ## Login shells
 

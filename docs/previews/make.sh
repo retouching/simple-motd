@@ -15,7 +15,7 @@ img=simple-motd-test:debian-13
 docker build -q -t "$img" -f "$REPO/tests/containers/debian-13.Dockerfile" "$REPO/tests/containers" >/dev/null
 
 for t in pink blue green orange; do
-  docker run --rm --hostname atlas -e USER=root -e SIMPLE_MOTD_CONF=/dev/null -e SIMPLE_MOTD_THEME="$t" \
+  docker run --rm --hostname atlas -e USER=root -e COLUMNS=78 -e SIMPLE_MOTD_CONF=/dev/null -e SIMPLE_MOTD_THEME="$t" \
     -e SIMPLE_MOTD_RUN=/m/share/demo -v "$REPO:/m:ro" "$img" bash /m/bin/simple-motd show > "build/$t.ansi"
 done
 

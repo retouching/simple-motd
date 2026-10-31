@@ -1,0 +1,13 @@
+#!/bin/sh
+# A fake docker CLI for the tests: answers as the mode in /tmp/fake-docker says
+# (swarm: a manager of 3 nodes, plain: no swarm, down: the daemon does not answer).
+mode=$(cat /tmp/fake-docker 2>/dev/null || echo plain)
+[ "$mode" = down ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
+case "$1 $2" in
+  "info --format") [ "$mode" = swarm ] && echo "27.3.1|active|true|3|18|2|0|42" || echo "26.1.5+dfsg1|inactive|false|0|4|2|0|470" ;;
+  "volume ls") seq 15 ;;
+  "network ls") seq 9 ;;
+  "stack ls") printf '%s\n' web db monitoring proxy ;;
+  "ps -q") echo deadbeef ;;                      # --filter health=unhealthy
+  "ps -a") printf '%s\n' wg-nas wg-nas edge-nginx repack-watch "" ;;
+esac

@@ -99,6 +99,38 @@ printf "#!/bin/sh\necho \"00000000:01:00.0, 12288, 2252\"\n" > /opt/fake/nvidia-
     x 'umount /srv/data; rm -rf /opt/fake /root/data.img; simple-motd collect; systemctl start simple-motd-collect.timer'
   fi
 
+  # --- docker part (fake docker CLI: swarm manager, no swarm, daemon down)
+  x 'systemctl stop simple-motd-collect.timer; mkdir -p /opt/fakedocker && cp /opt/simple-motd/tests/fake/docker /opt/fakedocker/'
+  dk() { x "echo $1 > /tmp/fake-docker; PATH=/opt/fakedocker:\$PATH simple-motd collect; simple-motd show" | sed 's/\x1b\[[0-9;]*m//g'; }
+  out=$(dk swarm)
+  check "docker swarm: engine line" grep -q "engine  *27.3.1 | swarm manager | 3 nodes" <<< "$out"
+  check "docker swarm: containers" grep -q "containers  *18 running | 2 stopped | 1 unhealthy" <<< "$out"
+  check "docker swarm: images, volumes, networks, stacks" bash -c 'grep -q "images  *42" <<< "$1" && grep -q "volumes  *15" <<< "$1" && grep -q "networks  *9" <<< "$1" && grep -qE "stacks  *4$" <<< "$1"' _ "$out"
+  out=$(dk plain)
+  check "docker plain: swarm inactive, compose projects" bash -c 'grep -q "26.1.5 | swarm inactive" <<< "$1" && grep -q "stacks  *3 (compose projects)" <<< "$1"' _ "$out"
+  out=$(dk down)
+  check "docker down: not running" grep -q "engine  *not running" <<< "$out"
+  x 'rm -rf /opt/fakedocker /tmp/fake-docker; simple-motd collect; systemctl start simple-motd-collect.timer'
+  check "no docker: no docker part" x '! simple-motd show | sed "s/\x1b\[[0-9;]*m//g" | grep -qx docker'
+  check "60 columns: no line wider" x 'COLUMNS=60 simple-motd show | sed "s/\x1b\[[0-9;]*m//g" | awk "length > 60 {exit 1}"'
+
+  # --- local terminals (docker exec -t gives a terminal without SSH_CONNECTION)
+  t() { docker exec -t "$@" | tr -d '\r' | sed 's/\x1b\[[0-9;]*m//g'; }
+  n() { grep -c '^security' <<< "$1"; }
+  check "local off by default: nothing" test "$(n "$(t "$c" bash -ic exit)")" -eq 0
+  x '/opt/simple-motd/install.sh --yes --local >/dev/null 2>&1'
+  check "local: bash shows it" test "$(n "$(t "$c" bash -ic exit)")" -eq 1
+  check "local: once in a subshell" test "$(n "$(t "$c" bash -ic 'bash -ic exit')")" -eq 1
+  check "local: zsh shows it" test "$(n "$(t "$c" zsh -ic exit)")" -eq 1
+  [[ $d == fedora-* ]] || check "local: dash login shows it" test "$(n "$(t "$c" dash -lic exit)")" -eq 1
+  check "local: not in VS Code" test "$(n "$(t -e TERM_PROGRAM=vscode "$c" bash -ic exit)")" -eq 0
+  check "local: not after sudo" test "$(n "$(t -e SUDO_USER=t "$c" bash -ic exit)")" -eq 0
+  check "local: not when piped" test "$(n "$(t "$c" bash -c 'bash -ic exit | cat')")" -eq 0
+  x 'useradd -m u2 2>/dev/null; mkdir -p /home/u2/.config && echo "SHOW=\"ssh\"" > /home/u2/.config/simple-motd.conf && chown -R u2: /home/u2/.config'
+  check "local: a user turns it off for themselves" test "$(n "$(t -u u2 -e HOME=/home/u2 "$c" bash -ic exit)")" -eq 0
+  x 'userdel -r u2 2>/dev/null; /opt/simple-motd/install.sh --yes --no-local >/dev/null 2>&1'
+  check "--no-local: blocks gone, nothing shown" bash -c '[ "$(grep -c "simple-motd local" <<< "$(docker exec "$1" cat /etc/bash.bashrc /etc/zsh/zshrc /etc/zshrc 2>/dev/null)")" -eq 0 ]' _ "$c"
+
   # --- private mode
   out=$(x '/opt/simple-motd/install.sh --yes --ssh private 2>&1')
   if grep -q "done. The screen" <<< "$out"; then

@@ -60,9 +60,19 @@ sshd's own errors go to the same file and are emptied with it: in this mode, rea
 
 No line, and nothing read.
 
+## Docker
+
+When the `docker` command exists (and `DOCKER` is not `off`), the timer asks the daemon, each call with a 10-second timeout: `docker info` (version, swarm state and role, nodes, running, stopped and paused containers, images), `docker volume ls`, `docker network ls`, `docker ps --filter health=unhealthy`, and the stacks: `docker stack ls` on a swarm manager, the distinct `com.docker.compose.project` labels elsewhere. A daemon that does not answer shows `engine  not running`.
+
+## Width
+
+In a terminal narrower than `WIDTH` (its size from `stty`, else `COLUMNS`), the header takes the terminal's width, the bars shrink (down to 6 characters) and each line longer than the terminal is cut with `...`, colours kept.
+
 ## Login shells
 
 The screen is printed by `/etc/profile.d/simple-motd.sh`, a POSIX file: bash and sh (dash, ash, ksh) read it as login shells, and zsh reads it through a block the installer adds to the system `zprofile` (`/etc/zsh/zprofile` or `/etc/zprofile`), since zsh does not read `/etc/profile.d` everywhere. `SIMPLE_MOTD_SHOWN` keeps it to once per session when both paths run.
+
+With `--local`, local terminals (non-login shells) reach the same file through a block in `/etc/bash.bashrc` and in the system zshrc; Fedora's `/etc/bashrc` already reads `/etc/profile.d`. A non-login sh only reads the file named by `$ENV`. The file decides: an SSH session, or a local terminal when `SHOW` (the system's, or the user's own) contains `local`, outside VS Code and JetBrains terminals and `sudo -s` / `sudo -i`.
 
 ## The prompt
 

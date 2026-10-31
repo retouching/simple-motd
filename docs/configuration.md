@@ -4,13 +4,19 @@
 
 ```bash
 THEME=pink        # pink, blue, green or orange (the screen and the prompt)
+SHOW="ssh"        # "ssh", or "ssh local" for every new local terminal too (install.sh --local)
 SSH_MODE=journal  # journal, private or off
 WIDTH=66          # width of the header line, in columns
 DISKS=""          # mount points in the usage part; empty: every local data file system
 MAX_DISKS=6       # at most this many disk lines, the others counted on one line
+DOCKER=auto       # the docker part when docker is installed, or off
 ```
 
-`THEME`, `WIDTH`, `DISKS` and `MAX_DISKS` apply at the next login. `SSH_MODE` changes what sshd does in `private` mode: switch it with `sudo ./install.sh --ssh <mode>` rather than by hand.
+`THEME`, `SHOW`, `WIDTH`, `DISKS` and `MAX_DISKS` apply at the next login, `DOCKER` within a minute. `SSH_MODE` changes what sshd does in `private` mode: switch it with `sudo ./install.sh --ssh <mode>` rather than by hand.
+
+## For one user
+
+`~/.config/simple-motd.conf` can set `THEME` and `SHOW` for one user, over the system's: for example `SHOW="ssh"` to keep local terminals quiet on a shared desktop where `--local` is on, or another theme.
 
 ## Themes
 
@@ -36,4 +42,4 @@ Each theme sets three colours of the 256-colour palette: the accent (bullets, ba
 ## Hiding the screen
 
 - For one user: `touch ~/.hushlogin` (it also hides the system's messages).
-- For a session: the screen only shows in interactive SSH logins; `ssh host command`, `scp` and `rsync` never see it.
+- When: in interactive shells writing to a terminal, once per terminal (`SIMPLE_MOTD_SHOWN` keeps subshells, `su` and tmux quiet); `ssh host command`, `scp`, `rsync`, piped output, VS Code and JetBrains terminals and `sudo -s` / `sudo -i` never see it.

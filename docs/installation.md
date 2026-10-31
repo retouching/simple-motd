@@ -14,12 +14,13 @@ sudo ./install.sh [options]
 | `--theme NAME` | `pink`, `blue`, `green` or `orange`. Without it, the installer shows the four and asks (in a terminal), keeps the current one (on a new run), or takes `pink`. |
 | `--ssh MODE` | `journal` (default), `private` or `off`: where SSH logins are counted from ([how it works](how-it-works.md#ssh-logins)). |
 | `--prompt` | Also install the bash prompt (`root ~ >`). |
+| `--local` / `--no-local` | Also show the screen in every new local terminal (`SHOW="ssh local"`), or back to SSH logins only. |
 | `--replace-motd` | Hide the distribution's own login messages, so the screen is the only one. |
 | `--yes` | Ask nothing: install the missing packages, keep the defaults. |
 | `--dry-run` | Print every file and command the run would install or run; change nothing. |
 | `--force` | Go on with a distribution outside the Debian, Ubuntu, Fedora and Arch families. |
 
-Running `install.sh` again updates the installed files and applies the options given; the options of the last run (`--ssh`, `--prompt`, `--replace-motd`, the theme) are kept when not given again.
+Running `install.sh` again updates the installed files and applies the options given; the options of the last run (`--ssh`, `--prompt`, `--local`, `--replace-motd`, the theme) are kept when not given again. Keys that a newer version adds to the configuration are appended to it, with their comments; your values stay.
 
 ## What it changes
 
@@ -34,6 +35,8 @@ Always:
 | `/etc/profile.d/simple-motd.sh` | Prints the screen once per SSH session, in interactive shells, unless `~/.hushlogin` exists |
 | `/etc/zsh/zprofile` or `/etc/zprofile` | A marked block that loads the line above, for zsh logins (when zsh is installed; run the installer again after installing zsh) |
 | `pciutils`, `dmidecode` (and on Arch `pacman-contrib`, `arch-audit`) | Installed when missing, after asking |
+
+With `--local`: a marked block in `/etc/bash.bashrc` and in the system zshrc (`/etc/zsh/zshrc` or `/etc/zshrc`) sources `/etc/profile.d/simple-motd.sh`, since local terminals open non-login shells (Fedora's `/etc/bashrc` already reads `/etc/profile.d`). `--no-local` removes them.
 
 With `--prompt`:
 

@@ -6,7 +6,7 @@
 | --- | --- |
 | `bin/simple-motd` | The command: `show`, `collect`, `theme`, `status` |
 | `share/profile.sh` | Prints the screen at SSH login (installed in `/etc/profile.d`) |
-| `share/prompt.sh` | The optional bash prompt |
+| `share/prompt.{bash,zsh,sh}`, `share/profile-prompt.sh` | The optional prompt, one per shell, and what loads it |
 | `share/demo/state` | A sample cache, for the theme previews of the installer and the README |
 | `etc/simple-motd.conf` | The default configuration |
 | `systemd/` | The timer, its service and the tmpfiles rules |
@@ -14,7 +14,7 @@
 | `tests/run.sh`, `tests/containers/` | The tests and the systemd containers they run in |
 | `docs/` | The documentation; `docs/previews/` the README pictures and how to make them |
 
-Everything is bash (4.2+, `share/profile.sh` is POSIX sh). No other language at run time, and no symbol outside ASCII in what the terminal shows.
+The tools are bash (4.2+); what runs in the user's shell is POSIX sh (`share/profile.sh`, `share/profile-prompt.sh`, `share/prompt.sh`) or that shell's own (`prompt.bash`, `prompt.zsh`). No other language at run time, and no symbol outside ASCII in what the terminal shows.
 
 ## Tests
 
@@ -23,7 +23,7 @@ tests/run.sh                  # shellcheck, then every distribution
 tests/run.sh debian-13        # one of them (a name of tests/containers/*.Dockerfile)
 ```
 
-They need Docker. For each distribution, a container boots systemd, runs sshd, and the script checks: the install with every option and the packages it adds, the screen at a real SSH login (ASCII only, without the distribution's messages), one good and two refused logins counted in `journal` then in `private` mode with no address in the journal or in simple-motd's files, the prompt, `simple-motd theme`, the screen for a normal user, and that `uninstall.sh` gives `/etc` back file for file. On Debian 12 it also checks the `/var/log/auth.log` fallback with a journal that keeps nothing.
+They need Docker. For each distribution, a container boots systemd, runs sshd, and the script checks: the install with every option and the packages it adds, the screen at a real SSH login (ASCII only, without the distribution's messages), one good and two refused logins counted in `journal` then in `private` mode with no address in the journal or in simple-motd's files, the three prompts printing the same lines (`tests/prompts.sh`), zsh and dash logins (screen once, prompt), `simple-motd theme`, the screen for a normal user, and that `uninstall.sh` gives `/etc` back file for file. On Debian 12 it also checks the `/var/log/auth.log` fallback with a journal that keeps nothing.
 
 Run them before each push. There is no CI.
 

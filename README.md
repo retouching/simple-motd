@@ -7,10 +7,10 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="Bash 4.2+" src="https://img.shields.io/badge/bash-4.2%2B-4EAA25.svg">
-  <img alt="Debian, Ubuntu, Fedora" src="https://img.shields.io/badge/runs%20on-Debian%20%7C%20Ubuntu%20%7C%20Fedora-E95420.svg">
+  <img alt="Debian, Ubuntu, Fedora, Arch" src="https://img.shields.io/badge/runs%20on-Debian%20%7C%20Ubuntu%20%7C%20Fedora%20%7C%20Arch-E95420.svg">
 </p>
 
-simple-motd replaces the login messages of a Debian, Ubuntu or Fedora server with one screen in three parts: **system** (OS, uptime, CPU, RAM, GPU), **usage** (load, CPU, memory, VRAM, swap and disk, as bars) and **security** (pending updates, security ones apart, and the SSH logins that worked and failed over the last 24 hours). A systemd timer gathers the slow values every minute, so the screen prints in a few milliseconds. It is plain bash with ASCII symbols only: no font, no runtime, nothing to keep up to date besides the repository.
+simple-motd replaces the login messages of a Debian, Ubuntu, Fedora or Arch server with one screen in three parts: **system** (OS, uptime, CPU, RAM, GPU), **usage** (load, CPU, memory, VRAM, swap and disk, as bars) and **security** (pending updates, security ones apart, and the SSH logins that worked and failed over the last 24 hours). A systemd timer gathers the slow values every minute, so the screen prints in a few milliseconds. It is plain shell with ASCII symbols only, and works whatever the login shell: bash, zsh or sh: no font, no runtime, nothing to keep up to date besides the repository.
 
 ## Screenshots
 
@@ -38,22 +38,22 @@ The values come from a sample machine. How to make them again: [CONTRIBUTING.md]
 
 - **One screen, three parts**: system, usage and security, aligned, with bars that turn yellow from 70 % and red from 90 %.
 - **Fast at login**: the screen reads a cache refreshed every minute by a systemd timer; the update list is recomputed only when the packages or their metadata change, and never goes to the network.
-- **Updates** from apt (Debian, Ubuntu) or dnf (Fedora), with the security ones counted apart and the date of the last run.
+- **Updates** from apt (Debian, Ubuntu), dnf (Fedora) or pacman (Arch), with the security ones counted apart and the date of the last run.
 - **SSH logins** that worked and failed over 24 hours, on one line. Only "ok" or "fail" and the time are kept: no address, no user name. Three modes:
   - `journal` (default): read from the journal of the sshd unit, or from `/var/log/auth.log` / `/var/log/secure` when the journal is not kept; sshd is left as it is.
   - `private`: sshd logs only to a file in RAM that simple-motd empties every minute, and nothing about SSH reaches the journal or the disk.
   - `off`: no SSH line.
 - **Hardware details** where the machine gives them: DDR type, speed and modules from `dmidecode`, GPU and VRAM from `lspci`, `nvidia-smi` or amdgpu; a virtual machine is marked as such.
 - **Four themes**: pink, blue, green, orange, picked at install time from a preview, changed later with `simple-motd theme <name>`.
-- **Optional prompt** (`root ~ >`) in pure bash, in the colours of the theme: directory, git branch read from `.git/HEAD` (git is never run), exit status in red after a failure.
+- **Optional prompt** (`root ~ >`) for bash, zsh and POSIX sh (dash, ash, ksh), the same in all three, in the colours of the theme: directory, git branch read from `.git/HEAD` (git is never run), exit status in red after a failure.
 - **Clean install**: one script, run again to change options, `--dry-run` to see what it would do; every file it replaces is copied first, and `uninstall.sh` gives the system back as it was.
 
 ## Requirements
 
-- Debian 12 or 13, Ubuntu 22.04 or 24.04, or Fedora 40 or 41 (other versions of these families likely work; anything else with `--force`).
-- systemd, bash 4.2 or later, root access.
-- `pciutils` and, on x86, `dmidecode`: the installer offers to install them.
-- `--ssh private` needs `/etc/ssh/sshd_config` to include `sshd_config.d` (the default on the systems above), and systemd 253 or later to keep the PAM messages out of the journal (Debian 13, Ubuntu 24.04, Fedora).
+- Debian 12 or 13, Ubuntu 22.04 or 24.04, Fedora 40 or 41, or Arch Linux (other versions and derivatives of these families likely work; anything else with `--force`).
+- systemd, bash 4.2 or later (for the tools; the login shell can be bash, zsh or sh), root access.
+- `pciutils` and, on x86, `dmidecode`; on Arch also `pacman-contrib` (`checkupdates`) and `arch-audit` (security updates): the installer offers to install them.
+- `--ssh private` needs `/etc/ssh/sshd_config` to include `sshd_config.d` (the default on the systems above), and systemd 253 or later to keep the PAM messages out of the journal (Debian 13, Ubuntu 24.04, Fedora, Arch).
 
 ## Quick start
 

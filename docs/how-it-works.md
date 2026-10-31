@@ -28,7 +28,9 @@ When the cache is more than five minutes old, the screen says so under the secur
 - **apt** (Debian, Ubuntu): `apt list --upgradable`; a package is a security update when its suite ends in `-security` (`trixie-security`, `noble-security`). The date is the last `Start-Date` of `/var/log/apt/history.log`.
 - **dnf** (Fedora): `dnf -C check-update` and `dnf -C updateinfo list --security --updates`, from the metadata cache only (`dnf-makecache.timer` refreshes it). The date is the last install time in the rpm database.
 
-The list is recomputed only when the package database or the metadata change (their modification times), or after six hours, so a minute-long timer costs almost nothing. simple-motd never refreshes the metadata itself: `apt-daily.timer` and `dnf-makecache.timer` do.
+- **pacman** (Arch): `checkupdates` (pacman-contrib), which syncs a copy of the databases into a temporary folder, so the system's stay untouched and no partial upgrade can follow; without it, `pacman -Qu` on the local databases, as fresh as the last `pacman -Sy`. Security: the number of upgradable packages `arch-audit -u` lists with a fixed vulnerability (0 without arch-audit). The date is the last `transaction completed` of `/var/log/pacman.log`. On Arch, these two queries go to the network, at most every six hours.
+
+The list is recomputed only when the package database or the metadata change (their modification times), or after six hours, so a minute-long timer costs almost nothing. On Debian, Ubuntu and Fedora simple-motd never refreshes the metadata itself: `apt-daily.timer` and `dnf-makecache.timer` do.
 
 ## SSH logins
 
@@ -57,9 +59,21 @@ sshd's own errors go to the same file and are emptied with it: in this mode, rea
 
 No line, and nothing read.
 
+## Login shells
+
+The screen is printed by `/etc/profile.d/simple-motd.sh`, a POSIX file: bash and sh (dash, ash, ksh) read it as login shells, and zsh reads it through a block the installer adds to the system `zprofile` (`/etc/zsh/zprofile` or `/etc/zprofile`), since zsh does not read `/etc/profile.d` everywhere. `SIMPLE_MOTD_SHOWN` keeps it to once per session when both paths run.
+
 ## The prompt
 
-`/usr/local/lib/simple-motd/prompt.sh` sets `PROMPT_COMMAND` to rebuild `PS1` before each prompt:
+Three versions print the same thing, checked by the tests line for line:
+
+| Shell | File | How it runs |
+| --- | --- | --- |
+| bash | `prompt.bash` | `PROMPT_COMMAND` rebuilds `PS1` before each prompt |
+| zsh | `prompt.zsh` | a `precmd` hook rebuilds `PROMPT`; `%` in a name is escaped |
+| sh (dash, ash, ksh) | `prompt.sh` | `PS1` calls a function at each prompt (command substitution) |
+
+They live in `/usr/local/lib/simple-motd/`. `/etc/profile.d/simple-motd-prompt.sh` loads the one of the running shell in login shells; blocks in `/etc/bash.bashrc` and the system `zshrc` (`/etc/zsh/zshrc` or `/etc/zshrc`) load it in the other interactive shells. A non-login sh only reads the file named by `$ENV`.
 
 ```
 root ~ >
@@ -68,8 +82,8 @@ root .../src/app/web (main) 1 >
 ```
 
 - the user, in the accent colour;
-- the directory, with `~` for the home folder and `.../` past three levels;
+- the directory, with `~` for the home folder, and only its last three levels behind `.../` past that;
 - the git branch, read from `.git/HEAD` in the directory or its parents (worktrees and submodules too), or the first seven characters of the commit when detached; git itself is never run, and the branch name is never run as code;
 - after a failed command, its exit status in red, and a red `>`.
 
-It works in bash only, with the colours of the theme in `/etc/simple-motd.conf`.
+The colours come from the theme in `/etc/simple-motd.conf`, read when the shell starts.

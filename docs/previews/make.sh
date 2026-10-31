@@ -24,7 +24,7 @@ docker run --rm --hostname atlas -e USER=root -e HOME=/root -v "$REPO:/m:ro" "$i
   set +e
   mkdir -p /srv/app/web/src && git_head=/srv/app/.git && mkdir -p $git_head && echo "ref: refs/heads/main" > $git_head/HEAD
   cd /root
-  . /m/share/prompt.sh
+  . /m/share/prompt.bash
   __smp_prompt_demo() { __smp_prompt; printf "%s%s\n" "${PS1@P}" "$1"; }
   # PS1 brackets \[ \] become \001 \002 once expanded: drop them.
   { true;  __smp_prompt_demo "cd /srv/app/web/src"

@@ -5,7 +5,9 @@
 #
 #   --theme NAME        pink, blue, green or orange (asked when run in a terminal, pink otherwise)
 #   --ssh MODE          journal (default), private or off: where SSH attempts are counted from
-#   --prompt            also install the "user dir >" bash prompt
+#   --prompt            also install the "user dir >" prompt (bash, zsh, sh)
+#   --local             also show the screen in every new local terminal (Konsole, GNOME Terminal...)
+#   --no-local          back to SSH sessions only
 #   --replace-motd      hide the system's own login messages (update-motd.d, /etc/motd, /etc/legal)
 #   --yes               no question: install missing packages, keep the defaults
 #   --dry-run           print what would be done, change nothing
@@ -25,7 +27,7 @@ SSHD_ENV=/etc/simple-motd-sshd.env
 SSHD_CONF=/etc/ssh/sshd_config.d/00-simple-motd.conf
 PRIVATE_LOG=/run/simple-motd/ssh/sshd.log
 
-THEME=""; SSH_MODE=""; PROMPT=0; REPLACE_MOTD=0; YES=0; DRY=0; FORCE=0
+THEME=""; SSH_MODE=""; PROMPT=0; REPLACE_MOTD=0; YES=0; DRY=0; FORCE=0; LOCAL=""
 
 c_ok=$'\e[38;5;156m'; c_warn=$'\e[38;5;222m'; c_bad=$'\e[38;5;203m'; c_dim=$'\e[38;5;244m'; c_r=$'\e[0m'
 say()  { printf '%s\n' "$*"; }
@@ -51,6 +53,8 @@ while (( $# )); do
     --ssh) SSH_MODE=${2-}; shift ;;
     --ssh=*) SSH_MODE=${1#*=} ;;
     --prompt) PROMPT=1 ;;
+    --local) LOCAL=1 ;;
+    --no-local) LOCAL=0 ;;
     --replace-motd) REPLACE_MOTD=1 ;;
     --yes|-y) YES=1 ;;
     --dry-run|-n) DRY=1 ;;
@@ -80,12 +84,14 @@ if [[ -z $FAMILY ]]; then
   warn "${PRETTY_NAME:-unknown system}: not tested, going on (--force)"
 fi
 
-PREV_SSH_MODE=""; PREV_PROMPT=0; PREV_REPLACE=0; MOTD_DISABLED=""; BACKUP_DIR=""; SSH_UNIT=""
+PREV_SSH_MODE=""; PREV_PROMPT=0; PREV_REPLACE=0; PREV_LOCAL=0; CREATED=""; MOTD_DISABLED=""; BACKUP_DIR=""; SSH_UNIT=""
 [[ -r $STATE ]] && . "$STATE"
 [[ -r $CONF ]] && CUR_THEME=$(sed -n 's/^THEME=//p' "$CONF" | tail -1) || CUR_THEME=""
 
 case ${SSH_MODE:=${PREV_SSH_MODE:-journal}} in journal|private|off) ;; *) die "--ssh: journal, private or off" ;; esac
 (( PREV_PROMPT )) && PROMPT=1
+[[ -z $LOCAL ]] && LOCAL=$PREV_LOCAL
+if (( LOCAL )); then SHOW="ssh local"; else SHOW="ssh"; fi
 (( PREV_REPLACE )) && REPLACE_MOTD=1
 
 # --------------------------------------------------------------------------- packages
@@ -146,19 +152,23 @@ backup() { # copy a file once into the backup folder, with its path
 
 # --------------------------------------------------------------------------- files
 
-step "simple-motd $(sed -n 's/^VERSION=//p' "$SRC/bin/simple-motd") (theme $THEME, ssh $SSH_MODE)"
+step "simple-motd $(sed -n 's/^VERSION=//p' "$SRC/bin/simple-motd") (theme $THEME, ssh $SSH_MODE, shown in: $SHOW)"
 put "$SRC/bin/simple-motd" "$BIN" 755
 put "$SRC/systemd/simple-motd-collect.service" "$UNIT_DIR/simple-motd-collect.service" 644
 put "$SRC/systemd/simple-motd-collect.timer" "$UNIT_DIR/simple-motd-collect.timer" 644
 put "$SRC/systemd/simple-motd.tmpfiles.conf" /etc/tmpfiles.d/simple-motd.conf 644
 put "$SRC/share/profile.sh" /etc/profile.d/simple-motd.sh 644
 
-if [[ -e $CONF ]]; then
-  if (( ! DRY )); then
-    sed -i "s/^THEME=.*/THEME=$THEME/; s/^SSH_MODE=.*/SSH_MODE=$SSH_MODE/" "$CONF"
-  else say "${c_dim}   would set:${c_r} THEME=$THEME SSH_MODE=$SSH_MODE in $CONF"; fi
+# The configuration: kept on a new run, with THEME, SSH_MODE and SHOW set; keys added by a newer
+# version are appended with their comments.
+[[ -e $CONF ]] || put "$SRC/etc/simple-motd.conf" "$CONF" 644
+if (( DRY )); then say "${c_dim}   would set:${c_r} THEME=$THEME SSH_MODE=$SSH_MODE SHOW=\"$SHOW\" in $CONF"
 else
-  sed "s/^THEME=.*/THEME=$THEME/; s/^SSH_MODE=.*/SSH_MODE=$SSH_MODE/" "$SRC/etc/simple-motd.conf" | write "$CONF" 644
+  awk -v conf="$CONF" 'BEGIN { while ((getline l < conf) > 0) if (l ~ /^[A-Z_]+=/) { split(l, k, "="); have[k[1]] = 1 } }
+       /^#/ || /^$/ { block = block $0 "\n"; next }
+       /^[A-Z_]+=/ { split($0, k, "="); if (!(k[1] in have)) printf "\n%s%s\n", block, $0; block = "" }' \
+    "$SRC/etc/simple-motd.conf" | sed '/^$/N;/^\n$/D' >> "$CONF"
+  sed -i "s/^THEME=.*/THEME=$THEME/; s/^SSH_MODE=.*/SSH_MODE=$SSH_MODE/; s/^SHOW=.*/SHOW=\"$SHOW\"/" "$CONF"
 fi
 
 # --------------------------------------------------------------------------- shell hooks
@@ -173,13 +183,46 @@ set_block() { # set_block FILE NAME LINE
   sed -i "/^$begin\$/,/^$end\$/d" "$f"
   printf '\n%s\n%s\n%s\n' "$begin" "$3" "$end" >> "$f"
 }
+unset_block() { # unset_block FILE NAME: remove a block and the blank line before it
+  local f=$1
+  grep -qxF "# >>> simple-motd $2 >>>" "$f" 2>/dev/null || return 0
+  if (( DRY )); then say "${c_dim}   would remove:${c_r} the $2 block of $f"; return 0; fi
+  awk -v b="# >>> simple-motd $2 >>>" -v e="# <<< simple-motd $2 <<<" '
+    function flush() { while (blank > 0) { print ""; blank-- } }
+    $0 == b { if (blank > 0) blank--; flush(); skip = 1; next }
+    skip { if ($0 == e) skip = 0; next }
+    /^$/ { blank++; next }
+    { flush(); print }
+    END { flush() }' "$f" > "$f.simple-motd.tmp" && cat "$f.simple-motd.tmp" > "$f" && rm -f "$f.simple-motd.tmp"
+}
 
 # zsh does not read /etc/profile.d on every system (Debian, Ubuntu): show the screen from zprofile.
 ZPROFILE=""; ZSHRC=""
 for f in /etc/zsh/zprofile /etc/zprofile; do [[ -f $f ]] && { ZPROFILE=$f; break; }; done
 for f in /etc/zsh/zshrc /etc/zshrc; do [[ -f $f ]] && { ZSHRC=$f; break; }; done
+# zsh without a system zshrc (Arch ships only /etc/zsh/zprofile): create it next to zprofile, so
+# that non-login zsh shells get the prompt and local terminals; uninstall.sh removes it if empty.
+CREATED=${CREATED-}
+if [[ -z $ZSHRC && -n $ZPROFILE ]] && command -v zsh >/dev/null 2>&1 && (( PROMPT || LOCAL )); then
+  ZSHRC=$(dirname "$ZPROFILE")/zshrc
+  if (( DRY )); then say "${c_dim}   would create:${c_r} $ZSHRC"
+  else : > "$ZSHRC"; chmod 644 "$ZSHRC"; fi
+  [[ " $CREATED " == *" $ZSHRC "* ]] || CREATED+="${CREATED:+ }$ZSHRC"
+fi
 if [[ -n $ZPROFILE ]]; then
   set_block "$ZPROFILE" login "[ -r /etc/profile.d/simple-motd.sh ] && . /etc/profile.d/simple-motd.sh"
+fi
+
+# Local terminals (Konsole...) open non-login shells: they read the system bashrc and zshrc.
+# Fedora's /etc/bashrc already reads /etc/profile.d.
+LOCAL_LINE="[ -r /etc/profile.d/simple-motd.sh ] && . /etc/profile.d/simple-motd.sh"
+if (( LOCAL )); then
+  step "local terminals: the screen in every new terminal"
+  [[ -f /etc/bash.bashrc ]] && set_block /etc/bash.bashrc local "$LOCAL_LINE"
+  [[ -n $ZSHRC ]] && set_block "$ZSHRC" local "$LOCAL_LINE"
+else
+  [[ -f /etc/bash.bashrc ]] && unset_block /etc/bash.bashrc local
+  [[ -n $ZSHRC ]] && unset_block "$ZSHRC" local
 fi
 
 if (( PROMPT )); then
@@ -319,7 +362,7 @@ if (( ! DRY )); then
   [[ $PREV_SSH_MODE != "$SSH_MODE" ]] && rm -f "$STATE_DIR/ssh-events" "$STATE_DIR/journal.cursor" "$STATE_DIR/authfile.pos"
   {
     echo "# written by install.sh, read by uninstall.sh"
-    echo "PREV_SSH_MODE=$SSH_MODE"; echo "PREV_PROMPT=$PROMPT"; echo "PREV_REPLACE=$REPLACE_MOTD"
+    echo "PREV_SSH_MODE=$SSH_MODE"; echo "PREV_PROMPT=$PROMPT"; echo "PREV_LOCAL=$LOCAL"; echo "CREATED=$(printf '%q' "$CREATED")"; echo "PREV_REPLACE=$REPLACE_MOTD"
     echo "MOTD_DISABLED=$(printf '%q' "$MOTD_DISABLED")"; echo "BACKUP_DIR=$(printf '%q' "$BACKUP_DIR")"
     echo "SSH_UNIT=$(printf '%q' "$SSH_UNIT")"
   } > "$STATE"

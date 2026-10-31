@@ -7,7 +7,7 @@
 [ -n "${BASH_VERSION-}" ] || return 0
 case $- in *i*) ;; *) return 0 ;; esac
 
-__smp_theme=$(sed -n 's/^THEME=//p' /etc/simple-motd.conf 2>/dev/null | tail -1)
+__smp_theme=$(sed -n 's/^THEME=//p' /etc/simple-motd.conf "${HOME-}/.config/simple-motd.conf" 2>/dev/null | tail -1)
 case ${__smp_theme:-pink} in
   blue)   __smp_a=111 __smp_h=33  __smp_l=153 ;;
   green)  __smp_a=114 __smp_h=35  __smp_l=157 ;;

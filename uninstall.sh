@@ -15,7 +15,7 @@ run()  { if (( DRY )); then printf '%s   would run:%s %s\n' "$c_dim" "$c_r" "$*"
 [[ $EUID -eq 0 ]] || { echo "run it as root: sudo ./uninstall.sh" >&2; exit 1; }
 
 STATE_DIR=/var/lib/simple-motd
-MOTD_DISABLED=""; BACKUP_DIR=""; SSH_UNIT=""
+MOTD_DISABLED=""; BACKUP_DIR=""; SSH_UNIT=""; CREATED=""
 [[ -r $STATE_DIR/install.state ]] && . "$STATE_DIR/install.state"
 
 step "timer"
@@ -54,6 +54,11 @@ for f in /etc/bash.bashrc /etc/zsh/zshrc /etc/zshrc /etc/zsh/zprofile /etc/zprof
     /^$/ { blank++; next }
     { flush(); print }
     END { flush() }' "$f" > "$f.simple-motd.tmp" && cat "$f.simple-motd.tmp" > "$f" && rm -f "$f.simple-motd.tmp"
+done
+
+# Files install.sh created (a zshrc on Arch): removed when nothing else was written in them.
+for f in $CREATED; do
+  if [[ -f $f && ! -s $f ]] || { [[ -f $f ]] && ! grep -q '[^[:space:]]' "$f"; }; then run rm -f "$f"; fi
 done
 
 step "files"

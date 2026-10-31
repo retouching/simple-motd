@@ -4,7 +4,7 @@
 # git branch read from .git/HEAD (git is never run), exit status in red after a failure.
 [[ -o interactive ]] || return 0
 
-typeset -g __smp_theme=${$(sed -n 's/^THEME=//p' /etc/simple-motd.conf 2>/dev/null | tail -n 1):-pink}
+typeset -g __smp_theme=${$(sed -n 's/^THEME=//p' /etc/simple-motd.conf "${HOME-}/.config/simple-motd.conf" 2>/dev/null | tail -n 1):-pink}
 typeset -g __smp_a __smp_h __smp_l
 case $__smp_theme in
   blue)   __smp_a=111 __smp_h=33  __smp_l=153 ;;

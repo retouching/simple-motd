@@ -56,6 +56,17 @@ for d in "${distros[@]}"; do
   check "no address stored" x '! grep -rqE "([0-9]{1,3}\.){3}[0-9]{1,3}" /var/lib/simple-motd /run/simple-motd'
   check "updates line" x 'simple-motd show | grep -q -e "up to date" -e pending'
   check "prompt in a login shell" bash -c 'grep -q "root .*>" <<< "$1"' _ "$screen"
+  check "bash, zsh and sh prompts identical" x 'bash /opt/simple-motd/tests/prompts.sh'
+  # Fedora's own /etc/profile.d is bash-only (lang.sh): dash is no login shell there.
+  shells="zsh dash"; [[ $d == fedora-* ]] && shells=zsh
+  for sh in $shells; do
+    x "usermod -s \$(command -v $sh) root"
+    s2=$(login | sed 's/\x1b\[[0-9;]*m//g')
+    check "$sh login: screen" grep -q "security" <<< "$s2"
+    check "$sh login: screen once" test "$(grep -c '^security' <<< "$s2")" -eq 1
+    check "$sh login: prompt" grep -q "root ~ >" <<< "$s2"
+  done
+  x 'usermod -s /bin/bash root'
   check "theme command" x 'simple-motd theme green && grep -q THEME=green /etc/simple-motd.conf'
   check "show as a normal user" x 'useradd -m t 2>/dev/null; su t -c "simple-motd show" | grep -q usage'
   t0=$(date +%s%N); x 'simple-motd show >/dev/null'; ms=$(( ($(date +%s%N) - t0) / 1000000 ))
@@ -79,7 +90,7 @@ for d in "${distros[@]}"; do
   # --- uninstall gives /etc back
   x '/opt/simple-motd/uninstall.sh >/dev/null'
   x 'userdel -r t 2>/dev/null; find /etc -xdev -type f -print0 | sort -z | xargs -0 md5sum > /root/etc.after; find /etc -xdev -type f -perm -u+x | sort > /root/etc.x.after'
-  diff=$(x 'diff /root/etc.before /root/etc.after | grep "^[<>]" | grep -vE "/etc/(ld.so.cache|machine-id|shadow-?|gshadow-?|passwd-?|group-?|subuid-?|subgid-?|\.pwd\.lock|apt/|dnf/|pki/|ssl/|alternatives/|systemd/system/(multi-user|sockets|timers)\.target\.wants/|systemd/system/ssh)" ; diff /root/etc.x.before /root/etc.x.after')
+  diff=$(x 'diff /root/etc.before /root/etc.after | grep "^[<>]" | grep -vE "/etc/(ld.so.cache|machine-id|shadow-?|gshadow-?|passwd-?|group-?|subuid-?|subgid-?|\.pwd\.lock|apt/|dnf/|pki/|ssl/|alternatives/|arch-audit/|conf.d/pacman-contrib|systemd/system/(multi-user|sockets|timers)\.target\.wants/|systemd/system/ssh)" ; diff /root/etc.x.before /root/etc.x.after')
   if [[ -z $diff ]]; then ok "uninstall gives /etc back"; else ko "uninstall gives /etc back"; printf '       %s\n' "${diff//$'\n'/$'\n       '}" | head -10; fi
   check "nothing left" x '! ls /usr/local/bin/simple-motd /var/lib/simple-motd /etc/simple-motd.conf 2>/dev/null | grep -q .'
 

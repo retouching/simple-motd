@@ -9,7 +9,13 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 ROOT=$PWD
 fails=0; ok() { printf '  \e[32mok\e[0m   %s\n' "$*"; }; ko() { printf '  \e[31mFAIL\e[0m %s\n' "$*"; fails=$((fails + 1)); }
-check() { local what=$1; shift; if "$@" >/dev/null 2>&1; then ok "$what"; else ko "$what"; fi; }
+check() { local what=$1; shift; if "$@" >/dev/null; then ok "$what"; else ko "$what"; fi; }
+# Log lines reach the journal or rsyslog a moment after the login: collect again, up to 10 s.
+settle() {
+  for _ in 1 2 3 4 5 6 7 8 9 10; do x "simple-motd collect; $1" >/dev/null 2>&1 && return 0; sleep 1; done
+  x 'grep -E "^ssh_" /run/simple-motd/state | paste -sd" "' >&2   # what was counted instead
+  return 1
+}
 
 echo "== shellcheck"
 if docker run --rm -v "$ROOT:/m:ro" -w /m koalaman/shellcheck:stable \
@@ -51,8 +57,7 @@ for d in "${distros[@]}"; do
   check "no system motd left" bash -c '! grep -qiE "programs included|Welcome to Ubuntu|Documentation:" <<< "$1"' _ "$screen"
   check "screen is ASCII only" bash -c '! LC_ALL=C grep -qP "[^\x00-\x7F]" <<< "$1"' _ "$screen"
   bad
-  x 'sleep 1; simple-motd collect'
-  check "journal: 1 ok, 2 failed" x 'simple-motd show | sed "s/\x1b\[[0-9;]*m//g" | grep -q "1 ok | 2 failed (last 24h)"'
+  check "journal: 1 ok, 2 failed" settle 'simple-motd show | sed "s/\x1b\[[0-9;]*m//g" | grep -q "1 ok | 2 failed (last 24h)"'
   check "no address stored" x '! grep -rqE "([0-9]{1,3}\.){3}[0-9]{1,3}" /var/lib/simple-motd /run/simple-motd'
   check "updates line" x 'simple-motd show | grep -q -e "up to date" -e pending'
   check "prompt in a login shell" bash -c 'grep -q "root .*>" <<< "$1"' _ "$screen"
@@ -72,14 +77,36 @@ for d in "${distros[@]}"; do
   t0=$(date +%s%N); x 'simple-motd show >/dev/null'; ms=$(( ($(date +%s%N) - t0) / 1000000 ))
   check "show is fast (${ms} ms incl. docker exec)" test "$ms" -lt 600
 
+  # --- several GPUs (fake lspci and nvidia-smi) and a second file system, on one Debian
+  if [[ $d == debian-13 ]]; then
+    x 'mkdir -p /opt/fake && cat > /opt/fake/lspci <<"EOF"
+#!/bin/sh
+case "$*" in
+  -D) printf "%s\n" "0000:00:02.0 VGA compatible controller: Intel Corporation UHD Graphics 750" "0000:01:00.0 VGA compatible controller: NVIDIA Corporation GA106 [GeForce RTX 3060] (rev a1)" ;;
+  "-s 0000:00:02.0") echo "0000:00:02.0 VGA compatible controller: Intel Corporation UHD Graphics 750" ;;
+  "-s 0000:01:00.0") echo "0000:01:00.0 VGA compatible controller: NVIDIA Corporation GA106 [GeForce RTX 3060] (rev a1)" ;;
+  "-v -s 0000:00:02.0") echo "	Memory at 6000000000 (64-bit, prefetchable) [size=256M]" ;;
+esac
+EOF
+printf "#!/bin/sh\necho \"00000000:01:00.0, 12288, 2252\"\n" > /opt/fake/nvidia-smi; chmod +x /opt/fake/*'
+    x 'truncate -s 300M /root/data.img && mkfs.ext4 -q /root/data.img && mkdir -p /srv/data && mount -o loop /root/data.img /srv/data'
+    x 'systemctl stop simple-motd-collect.timer; PATH=/opt/fake:$PATH simple-motd collect'
+    out=$(x 'simple-motd show' | sed 's/\x1b\[[0-9;]*m//g')
+    check "two GPUs in system" test "$(grep -c '^  \* gpu ' <<< "$out")" -eq 2
+    check "VRAM of the NVIDIA card" grep -q "vram .*2.2GB / 12.0GB" <<< "$out"
+    check "physical disks only in system (no loop)" bash -c '! grep -q "^  \* disk .*loop" <<< "$1" && grep -q "^  \* disk " <<< "$1"' _ "$out"
+    check "usage: / and /srv/data" bash -c 'grep -q "^  \* disk .*) /$" <<< "$1" && grep -q "^  \* disk .*) /srv/data$" <<< "$1"' _ "$out"
+    x 'umount /srv/data; rm -rf /opt/fake /root/data.img; simple-motd collect; systemctl start simple-motd-collect.timer'
+  fi
+
   # --- private mode
   out=$(x '/opt/simple-motd/install.sh --yes --ssh private 2>&1')
   if grep -q "done. The screen" <<< "$out"; then
     ok "install --ssh private"
     x 'sleep 1; journalctl --rotate -q; journalctl --vacuum-time=1s -q' >/dev/null 2>&1
     since=$(x 'date "+%Y-%m-%d %H:%M:%S"')
-    login >/dev/null; bad; x 'sleep 1; simple-motd collect'
-    check "private: 1 ok, 2 failed" x 'simple-motd show | sed "s/\x1b\[[0-9;]*m//g" | grep -q "1 ok | 2 failed"'
+    login >/dev/null; bad
+    check "private: 1 ok, 2 failed" settle 'simple-motd show | sed "s/\x1b\[[0-9;]*m//g" | grep -q "1 ok | 2 failed"'
     check "private: sshd log emptied" x '! test -s /run/simple-motd/ssh/sshd.log'
     check "private: no address in the journal" x "! journalctl --since '$since' -q | grep -qE '127\.0\.0\.1'"
   else
@@ -98,11 +125,11 @@ for d in "${distros[@]}"; do
   if [[ $d == debian-12 ]]; then
     x 'apt-get install -y -q rsyslog >/dev/null 2>&1; mkdir -p /etc/systemd/journald.conf.d
        printf "[Journal]\nStorage=none\n" > /etc/systemd/journald.conf.d/none.conf
-       journalctl --rotate -q; journalctl --vacuum-time=1s -q; systemctl restart systemd-journald rsyslog ssh; sleep 1'
+       systemctl restart systemd-journald rsyslog ssh; sleep 1'
     x '/opt/simple-motd/install.sh --yes >/dev/null 2>&1'
-    login >/dev/null; bad; x 'sleep 2; simple-motd collect'
+    login >/dev/null; bad
+    check "auth.log fallback: 1 ok, 2 failed" settle 'simple-motd show | sed "s/\x1b\[[0-9;]*m//g" | grep -q "1 ok | 2 failed"'
     check "auth.log fallback: source file" x 'simple-motd status | grep -q "ssh source  file"'
-    check "auth.log fallback: 1 ok, 2 failed" x 'simple-motd show | sed "s/\x1b\[[0-9;]*m//g" | grep -q "1 ok | 2 failed"'
     x '/opt/simple-motd/uninstall.sh >/dev/null'
   fi
 

@@ -380,7 +380,7 @@ cmd_show() {
   [[ ${COLS:-0} =~ ^[0-9]+$ && $COLS -gt 0 ]] || COLS=${COLUMNS:-0}
   [[ $COLS =~ ^[0-9]+$ ]] || COLS=0
   if (( COLS > 0 )); then
-    (( COLS < W )) && W=$COLS
+    W=$COLS   # the lines of dashes take the whole width of the terminal
     BAR=$(( COLS - 52 )); (( BAR > 24 )) && BAR=24; (( BAR < 6 )) && BAR=6
   fi
 
@@ -521,7 +521,10 @@ cmd_show() {
   local age=$((now - stamp))
   if [[ ! -r $state ]]; then printf '    %sno cache yet: is simple-motd-collect.timer running?%s\n' "$DIM" "$R"
   elif (( age > 300 )); then printf '    %scache %s min old: is simple-motd-collect.timer running?%s\n' "$DIM" "$((age / 60))" "$R"; fi
+  # Closing line, as wide as the header.
   echo
+  local bottom; bottom=$(printf '%*s' "$W" '')
+  printf '%s%s%s\n\n' "$TRK" "${bottom// /-}" "$R"
 }
 
 # ---------------------------------------------------------------------------

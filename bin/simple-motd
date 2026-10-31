@@ -8,7 +8,7 @@
 #   simple-motd version
 set -u
 
-VERSION=0.1.0
+VERSION=0.2.0
 CONF=${SIMPLE_MOTD_CONF:-/etc/simple-motd.conf}
 RUN_DIR=${SIMPLE_MOTD_RUN:-/run/simple-motd}
 LIB_DIR=${SIMPLE_MOTD_LIB:-/var/lib/simple-motd}

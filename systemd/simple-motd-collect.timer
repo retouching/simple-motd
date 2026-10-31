@@ -1,0 +1,11 @@
+[Unit]
+Description=simple-motd: refresh the login screen cache every minute
+Documentation=https://git.oh.rip/sylvain/simple-motd
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

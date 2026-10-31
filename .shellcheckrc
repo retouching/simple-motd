@@ -1,0 +1,4 @@
+# Sourced files (configuration, cache) are built at run time.
+disable=SC1090,SC1091
+# Single quotes on purpose: code run in another shell (docker exec, bash -c, PS1).
+disable=SC2016

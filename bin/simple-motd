@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+# simple-motd: a fast, dependency-free login screen for SSH sessions.
+#
+#   simple-motd show            print the login screen (reads the cache, a few ms)
+#   simple-motd collect         refresh the cache (run every minute by simple-motd-collect.timer)
+#   simple-motd theme [NAME]    show or set the theme (pink, blue, green, orange)
+#   simple-motd status          where the data comes from, cache age, timer state
+#   simple-motd version
+set -u
+
+VERSION=0.1.0
+CONF=${SIMPLE_MOTD_CONF:-/etc/simple-motd.conf}
+RUN_DIR=${SIMPLE_MOTD_RUN:-/run/simple-motd}
+LIB_DIR=${SIMPLE_MOTD_LIB:-/var/lib/simple-motd}
+PRIVATE_LOG=${SIMPLE_MOTD_PRIVATE_LOG:-$RUN_DIR/ssh/sshd.log}
+THEMES="pink blue green orange"
+
+# Defaults, overridden by the configuration file.
+THEME=pink
+SSH_MODE=journal
+WIDTH=66
+[[ -r $CONF ]] && . "$CONF"
+THEME=${SIMPLE_MOTD_THEME:-$THEME}   # one-off override (install.sh previews)
+
+# ---------------------------------------------------------------------------
+# collect
+# ---------------------------------------------------------------------------
+
+q() { printf '%q' "$1"; }
+
+pkg_manager() {
+  if command -v apt-get >/dev/null 2>&1 && [[ -d /var/lib/dpkg ]]; then echo apt
+  elif command -v dnf >/dev/null 2>&1; then echo dnf
+  else echo none; fi
+}
+
+# Signature of the package state: the update list is recomputed only when it changes
+# (package installed or metadata refreshed), or every 6 hours.
+pkg_signature() {
+  local f files=()
+  case $1 in
+    apt) files=(/var/lib/dpkg/status /var/lib/apt/lists /var/lib/apt/extended_states) ;;
+    dnf) files=(/var/lib/rpm /usr/lib/sysimage/rpm /var/cache/libdnf5 /var/cache/dnf) ;;
+  esac
+  for f in "${files[@]}"; do [[ -e $f ]] && stat -c '%Y' "$f"; done | paste -sd. -
+}
+
+collect_updates_apt() {
+  local list
+  list=$(apt list --upgradable 2>/dev/null | grep -F '[upgradable from')
+  upd=$(grep -c . <<< "$list")
+  sec=$(grep -c -- '-security' <<< "$list")
+  last_run=$(grep -h '^Start-Date:' /var/log/apt/history.log 2>/dev/null | tail -1 | awk '{print $2}')
+  [[ -z $last_run ]] && last_run=$(zgrep -h '^Start-Date:' /var/log/apt/history.log.*.gz 2>/dev/null | sort | tail -1 | awk '{print $2}')
+}
+
+collect_updates_dnf() {
+  local list
+  # -C: metadata cache only (refreshed by dnf-makecache.timer), never the network.
+  list=$(dnf -C -q check-update 2>/dev/null)
+  upd=$(awk 'NF==3 && $1 ~ /\./ && $1 !~ /^Obsoleting/' <<< "$list" | grep -c .)
+  sec=$(dnf -C -q updateinfo list --security --updates 2>/dev/null \
+        | awk 'tolower($0) ~ /sec/ { for (i = 2; i <= NF; i++) if ($i ~ /\.(x86_64|aarch64|noarch|i686|ppc64le|s390x|armv7hl)$/) print $i }' \
+        | sort -u | grep -c .)
+  local t
+  t=$(rpm -qa --qf '%{INSTALLTIME}\n' 2>/dev/null | sort -n | tail -1)
+  [[ -n $t ]] && last_run=$(date -d "@$t" +%F)
+}
+
+collect_updates() {
+  local sig cache=$RUN_DIR/updates
+  pm=$(pkg_manager); sig=$(pkg_signature "$pm")
+  upd=0; sec=0; last_run=""
+  if [[ -r $cache ]]; then
+    local c_sig="" c_time=0
+    . "$cache"
+    if [[ $c_sig == "$sig" ]] && (( now - c_time < 21600 )); then return; fi
+  fi
+  case $pm in
+    apt) collect_updates_apt ;;
+    dnf) collect_updates_dnf ;;
+  esac
+  { echo "c_sig=$(q "$sig")"; echo "c_time=$now"; echo "pm=$pm"
+    echo "upd=${upd:-0}"; echo "sec=${sec:-0}"; echo "last_run=$(q "${last_run:-}")"; } > "$cache.tmp"
+  mv -f "$cache.tmp" "$cache"
+  . "$cache"
+}
+
+# SSH attempts. Only "<epoch> ok|fail" is stored (LIB_DIR/ssh-events, 24 hours): no address,
+# no user name. Sources, by SSH_MODE:
+#   journal  the systemd journal of the sshd unit, read from a saved cursor;
+#            falls back to /var/log/auth.log or /var/log/secure (read from a saved offset)
+#   private  sshd logs only to PRIVATE_LOG (RAM, 0600), emptied after each read
+#   off      nothing
+ssh_classify() { # stdin: log lines -> "<epoch> ok|fail", one per attempt
+  # $1 = epoch to stamp, or "field" to take it from the first field of each line (journal).
+  awk -v t="$1" '
+    function out(r) { print (t == "field" ? int($1) : t), r }
+    /Accepted (publickey|password|keyboard-interactive|hostbased|gssapi)/ {out("ok"); next}
+    /(Connection closed by|Disconnected from) (authenticating|invalid) user/ {out("fail"); next}
+    /maximum authentication attempts exceeded/ {out("fail"); next}'
+}
+
+ssh_unit() {
+  local u
+  for u in ssh.service sshd.service; do
+    systemctl cat "$u" >/dev/null 2>&1 && { echo "$u"; return; }
+  done
+}
+
+ssh_from_journal() { # appends to $1; returns 1 when the journal has nothing for sshd
+  local out unit cursor cur_file=$LIB_DIR/journal.cursor args=()
+  command -v journalctl >/dev/null 2>&1 || return 1
+  unit=$(ssh_unit); [[ -n $unit ]] || return 1
+  # No entry at all for the unit (not even its start): the journal is not kept, use the files.
+  [[ -n $(journalctl -q --no-pager -u "$unit" -n 1 2>/dev/null) ]] || return 1
+  if [[ -s $cur_file ]]; then args=(--after-cursor "$(<"$cur_file")")
+  else args=(--since "-24h"); fi
+  out=$(journalctl -q --no-pager -u "$unit" -o short-unix --show-cursor "${args[@]}" 2>/dev/null)
+  cursor=$(sed -n 's/^-- cursor: //p' <<< "$out" | tail -1)
+  [[ -n $cursor ]] && printf '%s' "$cursor" > "$cur_file"
+  # Lines: "<epoch.usec> <host> <ident>[pid]: <message>".
+  grep -v '^-- ' <<< "$out" | ssh_classify field >> "$1"
+  return 0
+}
+
+ssh_from_file() { # syslog file fallback; counts start when simple-motd starts reading it
+  local f pos_file=$LIB_DIR/authfile.pos ino size off=0 p_ino=""
+  for f in /var/log/auth.log /var/log/secure; do [[ -r $f ]] && break; f=""; done
+  [[ -n $f ]] || return 1
+  ino=$(stat -c %i "$f"); size=$(stat -c %s "$f")
+  if [[ -r $pos_file ]]; then read -r p_ino off < "$pos_file"; fi
+  if [[ $p_ino != "$ino" ]]; then
+    # New file: on the very first run start at its end, after a rotation read it whole.
+    [[ -z $p_ino ]] && off=$size || off=0
+  fi
+  (( off > size )) && off=0
+  tail -c +"$((off + 1))" "$f" | grep -E 'sshd(-session)?\[' | ssh_classify "$now" >> "$1"
+  echo "$ino $size" > "$pos_file"
+}
+
+ssh_from_private() {
+  [[ -e $PRIVATE_LOG ]] || return 1
+  if [[ -s $PRIVATE_LOG ]]; then
+    ssh_classify "$now" < "$PRIVATE_LOG" >> "$1"
+    : > "$PRIVATE_LOG"
+  fi
+}
+
+collect_ssh() {
+  local ev=$LIB_DIR/ssh-events
+  ssh_ok=0; ssh_fail=0; ssh_source=off
+  [[ $SSH_MODE == off ]] && return
+  touch "$ev"; chmod 600 "$ev"
+  case $SSH_MODE in
+    private) ssh_from_private "$ev" && ssh_source=private || ssh_source=none ;;
+    *)       if ssh_from_journal "$ev"; then ssh_source=journal
+             elif ssh_from_file "$ev"; then ssh_source="file"
+             else ssh_source=none; fi ;;
+  esac
+  awk -v lim=$((now - 86400)) '$1 >= lim' "$ev" > "$ev.new" && mv -f "$ev.new" "$ev" && chmod 600 "$ev"
+  ssh_ok=$(grep -c ' ok$' "$ev"); ssh_fail=$(grep -c ' fail$' "$ev")
+  # sshd silenced (LogLevel QUIET, SILENT, FATAL or ERROR): nothing can be counted.
+  local lvl
+  lvl=$(sshd -T 2>/dev/null | awk '$1=="loglevel"{print toupper($2)}')
+  case $lvl in QUIET|SILENT|FATAL|ERROR) ssh_source=silenced ;; esac
+}
+
+collect_system() {
+  . /etc/os-release
+  os="${PRETTY_NAME:-$NAME} $(uname -m)"
+  virt=$(systemd-detect-virt 2>/dev/null) || virt=none
+  [[ $virt == none ]] && virt_tag="" || virt_tag=" | virtual"
+
+  local model threads cores ghz
+  model=$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo | sed -E 's/\((R|TM|tm)\)//g; s/ CPU / /; s/ [0-9]+-Core Processor//; s/ Processor$//; s/ @ .*//; s/ +/ /g; s/ $//')
+  [[ -z $model ]] && model=$(awk -F': ' '/^(Model|Hardware|cpu model)/{print $2; exit}' /proc/cpuinfo)
+  threads=$(nproc)
+  cores=$(lscpu -p=SOCKET,CORE 2>/dev/null | grep -v '^#' | sort -u | grep -c .)
+  (( cores > 0 )) || cores=$threads
+  ghz=$(awk -F': ' '/^cpu MHz/{s+=$2;n++} END{if(n) printf "%.2f", s/n/1000}' /proc/cpuinfo)
+  cpu="${model:-unknown} | ${cores}C/${threads}T${ghz:+ @ $ghz GHz}$virt_tag"
+  ncpu=$threads
+
+  ram=$(dmidecode -t memory 2>/dev/null | awk -F': ' -v v="$virt_tag" '
+    /^Memory Device/ {dev=1; next}
+    dev && /^\tSize:/ { if ($2 ~ /No Module|Not Installed/) {slots++; dev=0; next}
+                        n=$2+0; if ($2 ~ /MB/) n/=1024; size+=n; mods++; slots++ }
+    dev && /^\tType:/ && $2 !~ /Unknown|Other|^RAM$/ {type=$2}
+    dev && /^\tConfigured (Memory|Clock) Speed:/ && $2 !~ /Unknown/ {cs=$2}
+    dev && /^\tSpeed:/ && $2 !~ /Unknown/ {sp=$2}
+    dev && /^\tManufacturer:/ && $2 !~ /Unknown|Not Specified|QEMU|^ *$/ {mf=$2}
+    END { if (!mods) exit
+          s=sprintf("%g GB", size); if (type != "") s=s" "type
+          f=(cs != "" ? cs : sp); gsub(/ MT\/s| MHz/, "", f); if (f != "") s=s" @ "f" MT/s"
+          s=s" | "mods"/"slots" DIMM"; if (mf != "") s=s" | "mf
+          print s v }')
+
+  gpu=""; vram_total=""; vram_used=""
+  local slot
+  slot=$(lspci 2>/dev/null | awk '/VGA|3D controller|Display controller/{print $1; exit}')
+  if [[ -n $slot ]]; then
+    gpu=$(lspci -s "$slot" | sed -E 's/^[0-9a-f:.]+ [^:]+: //; s/ Corporation| Technologies| Inc\.?|\[|\]//g; s/ \(rev [0-9a-f]+\)//; s/ +/ /g')
+    local sys=/sys/bus/pci/devices/0000:$slot vt vu
+    if command -v nvidia-smi >/dev/null 2>&1 \
+       && read -r vt vu < <(nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ,); then
+      vram_total=$((vt * 1024)); vram_used=$((vu * 1024))
+    elif [[ -r $sys/mem_info_vram_total ]]; then
+      vram_total=$(( $(<"$sys/mem_info_vram_total") / 1024 ))
+      vram_used=$(( $(<"$sys/mem_info_vram_used") / 1024 ))
+    else
+      vram_total=$(lspci -v -s "$slot" 2>/dev/null | sed -nE 's/.*[^-]prefetchable\) \[size=([0-9]+)([MG])\].*/\1 \2/p' | head -1 \
+                   | awk '{print ($2=="G" ? $1*1048576 : $1*1024)}')
+    fi
+    [[ -n $vram_total ]] && gpu+=" | $(awk -v k="$vram_total" 'BEGIN{ if (k>=1048576) printf "%g GB", k/1048576; else printf "%g MB", k/1024 }') VRAM"
+    gpu+=$virt_tag
+  fi
+}
+
+collect_cpu_busy() {
+  local u n s i w x y z tot idle ptot pidle dt di
+  read -r _ u n s i w x y z _ < /proc/stat
+  tot=$((u + n + s + i + w + x + y + z)); idle=$((i + w)); cpu_busy=""
+  if [[ -r $RUN_DIR/cpu.prev ]]; then
+    read -r ptot pidle < "$RUN_DIR/cpu.prev"; dt=$((tot - ptot)); di=$((idle - pidle))
+    (( dt > 0 )) && cpu_busy=$(( (1000 * (dt - di) / dt + 5) / 10 ))
+  fi
+  echo "$tot $idle" > "$RUN_DIR/cpu.prev"
+}
+
+cmd_collect() {
+  [[ $EUID -eq 0 ]] || { echo "simple-motd collect: must run as root" >&2; return 1; }
+  umask 022; mkdir -p "$RUN_DIR" "$LIB_DIR"; chmod 700 "$LIB_DIR"
+  # One run at a time (the timer and a manual run would read the same cursor twice).
+  exec 9> "$RUN_DIR/.lock"
+  flock -w 30 9 || { echo "simple-motd collect: another run holds the lock" >&2; return 1; }
+  now=$(date +%s)
+  collect_system; collect_cpu_busy; collect_updates; collect_ssh
+  local tmp; tmp=$(mktemp "$RUN_DIR/.state.XXXXXX")
+  {
+    echo "os=$(q "$os")"; echo "cpu=$(q "$cpu")"; echo "ncpu=$ncpu"
+    echo "ram=$(q "$ram")"; echo "gpu=$(q "$gpu")"
+    echo "vram_total=$vram_total"; echo "vram_used=$vram_used"; echo "cpu_busy=$cpu_busy"
+    echo "pm=$pm"; echo "upd=$upd"; echo "sec=$sec"; echo "last_run=$(q "$last_run")"
+    echo "ssh_source=$ssh_source"; echo "ssh_ok=$ssh_ok"; echo "ssh_fail=$ssh_fail"
+    echo "stamp=$now"
+  } > "$tmp"
+  chmod 644 "$tmp"; mv -f "$tmp" "$RUN_DIR/state"
+}
+
+# ---------------------------------------------------------------------------
+# show
+# ---------------------------------------------------------------------------
+
+theme_colors() { # accent, titles, labels (256-colour palette)
+  case $1 in
+    blue)   echo "111 33 153" ;;
+    green)  echo "114 35 157" ;;
+    orange) echo "215 208 223" ;;
+    *)      echo "213 205 218" ;;
+  esac
+}
+
+cmd_show() {
+  local state=$RUN_DIR/state
+  [[ ! -r $state && $EUID -eq 0 ]] && cmd_collect 2>/dev/null
+  # Values from the cache (defaults first, the file may be missing).
+  local os="" cpu="" ncpu="" ram="" gpu="" vram_total="" vram_used="" cpu_busy="" pm="" upd=0 sec=0
+  local last_run="" ssh_source=off ssh_ok=0 ssh_fail=0 stamp=0
+  # demo_* values replace the live ones: only set by share/demo/state, for the previews.
+  local demo_uptime="" demo_load="" demo_mem="" demo_swap="" demo_disk=""
+  [[ -r $state ]] && . "$state"
+
+  local a h l
+  read -r a h l <<< "$(theme_colors "$THEME")"
+  local E=$'\e[' R=$'\e[0m' B=$'\e[1m'
+  local ACC="${E}38;5;${a}m" TTL="${E}1;38;5;${h}m" LBL="${E}38;5;${l}m" TXT="${E}38;5;255m"
+  local DIM="${E}38;5;244m" TRK="${E}38;5;238m" OK="${E}38;5;156m" WARN="${E}38;5;222m" BAD="${E}38;5;203m"
+  local W=$WIDTH BAR=24 SEP=" ${E}38;5;244m|${E}0m "
+
+  row() { printf '  %s*%s %s%-9s%s %s\n' "$ACC" "$R" "$LBL" "$1" "$R" "$2"; }
+  fmt() { local s=${1// | /$SEP}; printf '%s' "$TXT$s$R"; }
+  bar() {
+    local p=${1%.*} f c=$ACC x y
+    (( p < 0 )) && p=0; (( p > 100 )) && p=100
+    f=$(( (p * BAR + 50) / 100 ))
+    (( p >= 70 )) && c=$WARN; (( p >= 90 )) && c=$BAD
+    x=$(printf '%*s' "$f" ''); y=$(printf '%*s' $((BAR - f)) '')
+    printf '%s[%s%s%s%s%s]%s' "$TRK" "$c" "${x// /#}" "$TRK" "${y// /.}" "$TRK" "$R"
+  }
+  hb()  { awk -v k="$1" 'BEGIN{split("KB MB GB TB",u," ");i=1;while(k>=1024&&i<4){k/=1024;i++} printf "%.1f%s",k,u[i]}'; }
+  pct() { awk -v a="$1" -v b="$2" 'BEGIN{ if (b>0) printf "%d", a*100/b+0.5; else print 0 }'; }
+
+  local now up user host title left right dl dr
+  now=$(date +%s); up=${demo_uptime:-$(cut -d. -f1 /proc/uptime)}
+  user=${USER:-$(id -un)}; host=$(uname -n); host=${host%%.*}
+  title=" $user@$host "; left=$(( (W - ${#title}) / 2 )); right=$(( W - ${#title} - left ))
+  (( left < 0 )) && left=0; (( right < 0 )) && right=0
+  dl=$(printf '%*s' "$left" ''); dr=$(printf '%*s' "$right" '')
+  echo
+  printf '%s%s%s %s%s%s@%s%s %s%s%s%s\n\n' "$TRK" "${dl// /-}" "$R" "$TXT$B" "$user" "$ACC" "$TXT$B" "$host" "$R" "$TRK" "${dr// /-}" "$R"
+
+  # system
+  printf '%s%s%s\n' "$TTL" system "$R"
+  local d hh m uptxt
+  d=$((up / 86400)); hh=$((up % 86400 / 3600)); m=$((up % 3600 / 60))
+  uptxt=""; (( d )) && uptxt="${d}d "; uptxt+="${hh}h ${m}m"
+  row os "$(fmt "${os:-?}")"
+  row uptime "$TXT$uptxt$R$SEP${DIM}booted $(date -d "@$((now - up))" '+%Y-%m-%d %H:%M')$R"
+  row cpu "$(fmt "${cpu:-?}")"
+  [[ -n $ram ]] && row ram "$(fmt "$ram")"
+  [[ -n $gpu ]] && row gpu "$(fmt "$gpu")"
+  echo
+
+  # usage
+  printf '%s%s%s\n' "$TTL" usage "$R"
+  local n=${ncpu:-$(nproc)} l1 l5 l15 lp
+  read -r l1 l5 l15 _ <<< "${demo_load:-$(</proc/loadavg)}"
+  lp=$(awk -v l="$l1" -v n="$n" 'BEGIN{printf "%d", l*100/n+0.5}')
+  row load "$(bar "$lp") $TXT$l1 $l5 $l15$R ${DIM}($lp% of $n)$R"
+  if [[ -n $cpu_busy ]]; then row cpu "$(bar "$cpu_busy") $TXT$((cpu_busy * n))%$R ${DIM}($cpu_busy% of $n CPU)$R"
+  else row cpu "$(bar 0) ${DIM}first sample in a minute$R"; fi
+  local k v mt=0 ma=0 st=0 sf=0 mu mp su sp
+  while read -r k v _; do
+    case $k in MemTotal:) mt=$v ;; MemAvailable:) ma=$v ;; SwapTotal:) st=$v ;; SwapFree:) sf=$v ;; esac
+  done < /proc/meminfo
+  [[ -n $demo_mem ]] && read -r mt ma <<< "$demo_mem"
+  [[ -n $demo_swap ]] && read -r st sf <<< "$demo_swap"
+  mu=$((mt - ma)); mp=$(pct "$mu" "$mt")
+  row memory "$(bar "$mp") $TXT$(hb "$mu") / $(hb "$mt")$R ${DIM}($mp%)$R"
+  if [[ -n $vram_used && -n $vram_total ]]; then
+    local vp; vp=$(pct "$vram_used" "$vram_total")
+    row vram "$(bar "$vp") $TXT$(hb "$vram_used") / $(hb "$vram_total")$R ${DIM}($vp%)$R"
+  fi
+  if (( st > 0 )); then su=$((st - sf)); sp=$(pct "$su" "$st"); row swap "$(bar "$sp") $TXT$(hb "$su") / $(hb "$st")$R ${DIM}($sp%)$R"
+  else row swap "$(bar 0) ${DIM}disabled$R"; fi
+  local dt du dp
+  read -r _ dt du _ < <(df -kP / | tail -1)
+  [[ -n $demo_disk ]] && read -r dt du <<< "$demo_disk"
+  dp=$(pct "$du" "$dt")
+  row disk "$(bar "$dp") $TXT$(hb "$du") / $(hb "$dt")$R ${DIM}($dp%)$R"
+  echo
+
+  # security
+  printf '%s%s%s\n' "$TTL" security "$R"
+  local u
+  if [[ $pm == none || -z $pm ]]; then u="${DIM}no apt or dnf$R"
+  elif (( upd == 0 )); then u="${OK}up to date$R"
+  else u="${WARN}$upd pending$R"; (( sec )) && u+="$SEP${BAD}${B}$sec security$R"; fi
+  [[ -n $last_run ]] && u+="$SEP${DIM}last $pm run $last_run$R"
+  row updates "$u"
+  case $ssh_source in
+    off) ;;
+    none)     row ssh "${DIM}not counted (no sshd log found)$R" ;;
+    silenced) row ssh "${DIM}not counted (sshd LogLevel is QUIET)$R" ;;
+    *) local fc=$OK; (( ssh_fail )) && fc=$BAD
+       row ssh "$OK$ssh_ok ok$R$SEP$fc$ssh_fail failed$R ${DIM}(last 24h)$R" ;;
+  esac
+  local age=$((now - stamp))
+  if [[ ! -r $state ]]; then printf '    %sno cache yet: is simple-motd-collect.timer running?%s\n' "$DIM" "$R"
+  elif (( age > 300 )); then printf '    %scache %s min old: is simple-motd-collect.timer running?%s\n' "$DIM" "$((age / 60))" "$R"; fi
+  echo
+}
+
+# ---------------------------------------------------------------------------
+# theme, status
+# ---------------------------------------------------------------------------
+
+cmd_theme() {
+  if [[ -z ${1-} ]]; then echo "$THEME"; return; fi
+  [[ " $THEMES " == *" $1 "* ]] || { echo "unknown theme: $1 (choose: $THEMES)" >&2; return 1; }
+  [[ $EUID -eq 0 ]] || { echo "simple-motd theme: must run as root" >&2; return 1; }
+  if grep -q '^THEME=' "$CONF" 2>/dev/null; then sed -i "s/^THEME=.*/THEME=$1/" "$CONF"
+  else echo "THEME=$1" >> "$CONF"; fi
+  echo "theme: $1"
+}
+
+cmd_status() {
+  local state=$RUN_DIR/state stamp=0 ssh_source="?" pm="?"
+  [[ -r $state ]] && . "$state"
+  echo "simple-motd $VERSION"
+  echo "config      $CONF (THEME=$THEME SSH_MODE=$SSH_MODE WIDTH=$WIDTH)"
+  echo "cache       $state ($( [[ -r $state ]] && echo "$(( $(date +%s) - stamp ))s old" || echo missing))"
+  echo "timer       $(systemctl is-active simple-motd-collect.timer 2>/dev/null)"
+  echo "packages    $pm"
+  echo "ssh source  $ssh_source"
+}
+
+case ${1-show} in
+  show)    cmd_show ;;
+  collect) cmd_collect ;;
+  theme)   cmd_theme "${2-}" ;;
+  status)  cmd_status ;;
+  version|--version|-V) echo "simple-motd $VERSION" ;;
+  help|--help|-h) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) echo "simple-motd: unknown command: $1 (see simple-motd help)" >&2; exit 2 ;;
+esac

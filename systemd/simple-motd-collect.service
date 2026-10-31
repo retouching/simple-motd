@@ -1,0 +1,9 @@
+[Unit]
+Description=simple-motd: refresh the login screen cache
+Documentation=https://git.oh.rip/sylvain/simple-motd
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/simple-motd collect
+Nice=10
+IOSchedulingClass=idle

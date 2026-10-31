@@ -41,12 +41,20 @@ for f in /etc/motd /etc/legal; do
   if [[ -n $BACKUP_DIR && -f $BACKUP_DIR$f ]]; then run cp -a "$BACKUP_DIR$f" "$f"; fi
 done
 
-if [[ -f /etc/bash.bashrc ]] && grep -qF '# >>> simple-motd prompt >>>' /etc/bash.bashrc; then
-  step "prompt removed from /etc/bash.bashrc"
-  run sed -i '/^# >>> simple-motd prompt >>>$/,/^# <<< simple-motd prompt <<<$/d' /etc/bash.bashrc
-  # install.sh added one blank line before its block.
-  (( DRY )) || sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' /etc/bash.bashrc
-fi
+# Marked blocks in the system shell files (prompt, zsh login).
+for f in /etc/bash.bashrc /etc/zsh/zshrc /etc/zshrc /etc/zsh/zprofile /etc/zprofile; do
+  if ! { [[ -f $f ]] && grep -q '^# >>> simple-motd ' "$f"; }; then continue; fi
+  step "shell hooks removed from $f"
+  # Drop each block and the blank line install.sh put before it; nothing else moves.
+  if (( DRY )); then printf '%s   would remove:%s the simple-motd blocks of %s\n' "$c_dim" "$c_r" "$f"; continue; fi
+  awk '
+    function flush() { while (blank > 0) { print ""; blank-- } }
+    /^# >>> simple-motd .* >>>$/ { if (blank > 0) blank--; flush(); skip = 1; next }
+    skip { if ($0 ~ /^# <<< simple-motd .* <<<$/) skip = 0; next }
+    /^$/ { blank++; next }
+    { flush(); print }
+    END { flush() }' "$f" > "$f.simple-motd.tmp" && cat "$f.simple-motd.tmp" > "$f" && rm -f "$f.simple-motd.tmp"
+done
 
 step "files"
 run rm -f /usr/local/bin/simple-motd /etc/profile.d/simple-motd.sh /etc/profile.d/simple-motd-prompt.sh \

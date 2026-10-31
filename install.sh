@@ -24,8 +24,6 @@ UNIT_DIR=/etc/systemd/system
 SSHD_ENV=/etc/simple-motd-sshd.env
 SSHD_CONF=/etc/ssh/sshd_config.d/00-simple-motd.conf
 PRIVATE_LOG=/run/simple-motd/ssh/sshd.log
-BASHRC_BEGIN="# >>> simple-motd prompt >>>"
-BASHRC_END="# <<< simple-motd prompt <<<"
 
 THEME=""; SSH_MODE=""; PROMPT=0; REPLACE_MOTD=0; YES=0; DRY=0; FORCE=0
 
@@ -75,9 +73,10 @@ FAMILY=""
 case " ${ID-} ${ID_LIKE-} " in
   *" debian "*|*" ubuntu "*) FAMILY=debian ;;
   *" fedora "*|*" rhel "*|*" centos "*) FAMILY=fedora ;;
+  *" arch "*) FAMILY=arch ;;
 esac
 if [[ -z $FAMILY ]]; then
-  (( FORCE )) || die "${PRETTY_NAME:-this system} was not tested (Debian, Ubuntu and Fedora are). --force to go on"
+  (( FORCE )) || die "${PRETTY_NAME:-this system} was not tested (Debian, Ubuntu, Fedora and Arch are). --force to go on"
   warn "${PRETTY_NAME:-unknown system}: not tested, going on (--force)"
 fi
 
@@ -96,6 +95,11 @@ command -v lspci >/dev/null 2>&1 || need+=(pciutils)
 case $(uname -m) in x86_64|i?86) command -v dmidecode >/dev/null 2>&1 || need+=(dmidecode) ;; esac
 command -v lscpu >/dev/null 2>&1 || need+=(util-linux)
 command -v awk >/dev/null 2>&1 || need+=(gawk)
+# Arch: checkupdates (pacman-contrib) for an up-to-date count, arch-audit for the security one.
+if [[ $FAMILY == arch ]]; then
+  command -v checkupdates >/dev/null 2>&1 || need+=(pacman-contrib)
+  command -v arch-audit >/dev/null 2>&1 || need+=(arch-audit)
+fi
 if (( ${#need[@]} )); then
   step "packages to install: ${need[*]} (CPU, RAM and GPU details)"
   if (( ! YES )) && [[ -t 0 ]]; then
@@ -105,6 +109,7 @@ if (( ${#need[@]} )); then
     case $FAMILY in
       debian) run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${need[@]}" >/dev/null ;;
       fedora) run dnf -y -q install "${need[@]}" >/dev/null ;;
+      arch) run pacman -S --needed --noconfirm -q "${need[@]}" >/dev/null ;;
       *) warn "install ${need[*]} by hand" ;;
     esac
   fi
@@ -156,22 +161,42 @@ else
   sed "s/^THEME=.*/THEME=$THEME/; s/^SSH_MODE=.*/SSH_MODE=$SSH_MODE/" "$SRC/etc/simple-motd.conf" | write "$CONF" 644
 fi
 
-# --------------------------------------------------------------------------- prompt
+# --------------------------------------------------------------------------- shell hooks
+
+# A marked block in a system shell file, written again on each run (removed by uninstall.sh).
+set_block() { # set_block FILE NAME LINE
+  local f=$1 begin="# >>> simple-motd $2 >>>" end="# <<< simple-motd $2 <<<"
+  if grep -qxF "$begin" "$f" 2>/dev/null && \
+     [[ $(sed -n "/^$begin\$/,/^$end\$/p" "$f" | sed -n 2p) == "$3" ]]; then return 0; fi
+  backup "$f"
+  if (( DRY )); then say "${c_dim}   would set:${c_r} the $2 block of $f"; return 0; fi
+  sed -i "/^$begin\$/,/^$end\$/d" "$f"
+  printf '\n%s\n%s\n%s\n' "$begin" "$3" "$end" >> "$f"
+}
+
+# zsh does not read /etc/profile.d on every system (Debian, Ubuntu): show the screen from zprofile.
+ZPROFILE=""; ZSHRC=""
+for f in /etc/zsh/zprofile /etc/zprofile; do [[ -f $f ]] && { ZPROFILE=$f; break; }; done
+for f in /etc/zsh/zshrc /etc/zshrc; do [[ -f $f ]] && { ZSHRC=$f; break; }; done
+if [[ -n $ZPROFILE ]]; then
+  set_block "$ZPROFILE" login "[ -r /etc/profile.d/simple-motd.sh ] && . /etc/profile.d/simple-motd.sh"
+fi
 
 if (( PROMPT )); then
-  step "prompt"
+  step "prompt (bash, zsh and sh)"
+  put "$SRC/share/prompt.bash" "$LIB/prompt.bash" 644
+  put "$SRC/share/prompt.zsh" "$LIB/prompt.zsh" 644
   put "$SRC/share/prompt.sh" "$LIB/prompt.sh" 644
-  printf '# simple-motd prompt (bash only)\n[ -n "${BASH_VERSION-}" ] && . %s/prompt.sh\n' "$LIB" | write /etc/profile.d/simple-motd-prompt.sh 644
-  # Debian and Ubuntu: non-login shells read /etc/bash.bashrc, not /etc/profile.d.
-  if [[ -f /etc/bash.bashrc ]] && ! grep -qF "$BASHRC_BEGIN" /etc/bash.bashrc; then
-    backup /etc/bash.bashrc
-    if (( DRY )); then say "${c_dim}   would add:${c_r} the prompt to /etc/bash.bashrc"
-    else printf '\n%s\n[ -r %s/prompt.sh ] && . %s/prompt.sh\n%s\n' "$BASHRC_BEGIN" "$LIB" "$LIB" "$BASHRC_END" >> /etc/bash.bashrc; fi
-  fi
-  for rc in /root/.bashrc ${SUDO_USER:+$(getent passwd "$SUDO_USER" | cut -d: -f6)/.bashrc}; do
-    [[ -r $rc ]] && grep -qE '^[^#]*(starship init|oh-my-posh|PROMPT_COMMAND=|PS1=)' "$rc" \
-      && warn "$rc sets its own prompt (starship, PS1…): it runs after simple-motd's and wins. Comment it out to use simple-motd's."
+  put "$SRC/share/profile-prompt.sh" /etc/profile.d/simple-motd-prompt.sh 644
+  # Login shells read /etc/profile.d; the others read these files.
+  [[ -f /etc/bash.bashrc ]] && set_block /etc/bash.bashrc prompt "[ -r $LIB/prompt.bash ] && . $LIB/prompt.bash"
+  [[ -n $ZSHRC ]] && set_block "$ZSHRC" prompt "[ -r $LIB/prompt.zsh ] && . $LIB/prompt.zsh"
+  home=""; [[ -n ${SUDO_USER-} ]] && home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+  for rc in /root/.bashrc /root/.zshrc ${home:+$home/.bashrc $home/.zshrc}; do
+    [[ -r $rc ]] && grep -qE '^[^#]*(starship init|oh-my-posh|oh-my-zsh|powerlevel|PROMPT_COMMAND=|PS1=|PROMPT=)' "$rc" \
+      && warn "$rc sets its own prompt (starship, oh-my-zsh, PS1...): it runs after simple-motd's and wins. Comment it out to use simple-motd's."
   done
+  [[ -z $ZSHRC ]] && command -v zsh >/dev/null 2>&1 && warn "no system zshrc found: zsh gets the prompt in login shells only"
 fi
 
 # --------------------------------------------------------------------------- system login messages
@@ -220,8 +245,15 @@ setup_private() {
     || die "--ssh private: /etc/ssh/sshd_config does not include sshd_config.d"
   local exec var envfiles cur=""
   exec=$(systemctl show -p ExecStart --value "$SSH_UNIT")
-  var=$(grep -oE '\$\{?[A-Z_]+' <<< "$exec" | head -1 | tr -d '${')
-  [[ -n $var ]] || die "--ssh private: $SSH_UNIT takes no option variable (\$SSHD_OPTS, \$OPTIONS)"
+  var=$(grep -oE '\$\{?[A-Z_]+' <<< "$exec" | head -1 | tr -d '${' || true)
+  # No option variable (Arch: ExecStart=/usr/bin/sshd -D): ExecStart is replaced instead.
+  local exec_line=""
+  if [[ -z $var ]]; then
+    local argv; argv=$(sed -nE 's/.*argv\[\]=([^;]*[^ ;]) *;.*/\1/p' <<< "$exec" | head -1)
+    [[ $argv == */sshd* ]] || die "--ssh private: cannot read the ExecStart of $SSH_UNIT"
+    exec_line=$'ExecStart=\nExecStart='"$argv -E $PRIVATE_LOG"
+    var=SIMPLE_MOTD_UNUSED
+  fi
   envfiles=$(systemctl show -p EnvironmentFiles --value "$SSH_UNIT" | awk '{print $1}')
   for f in $envfiles; do
     [[ -r $f ]] && cur=$(set +u; . "$f" >/dev/null 2>&1; eval "printf '%s' \"\${$var-}\"")
@@ -244,6 +276,7 @@ setup_private() {
 [Service]
 ExecStartPre=/bin/mkdir -p -m 0700 /run/simple-motd/ssh
 EnvironmentFile=$SSHD_ENV
+$exec_line
 $filter
 EOF
   write "$SSHD_CONF" 644 <<'EOF'
@@ -252,9 +285,9 @@ EOF
 LogLevel INFO
 EOF
   (( DRY )) && return
-  local lvl; lvl=$(sshd -T 2>/dev/null | awk '$1=="loglevel"{print toupper($2)}')
+  local lvl; lvl=$(sshd -T 2>/dev/null | awk 'tolower($1)=="loglevel"{print toupper($2)}')
   if [[ $lvl != INFO && $lvl != VERBOSE ]]; then
-    local who; who=$(grep -lisE '^\s*LogLevel' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf | grep -v "$SSHD_CONF" | paste -sd' ' -)
+    local who; who=$(grep -lisE '^\s*LogLevel' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf | grep -v "$SSHD_CONF" | paste -sd' ' - || true)
     remove_private
     die "--ssh private: sshd keeps LogLevel $lvl, set first in: $who (the first value wins). Remove that line and run again."
   fi

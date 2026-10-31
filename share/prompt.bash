@@ -1,5 +1,5 @@
-# simple-motd prompt: "user dir (branch) >" in pure bash (no starship, no git, no special font).
-# Installed as /usr/local/lib/simple-motd/prompt.sh and sourced by interactive bash shells.
+# simple-motd prompt for bash: "user dir (branch) >" in pure bash (no starship, no git, no special font).
+# Installed as /usr/local/lib/simple-motd/prompt.bash and sourced by interactive bash shells.
 #   - user name in the theme colour, directory (~, and .../ past three levels)
 #   - git branch read straight from .git/HEAD (git is never run)
 #   - exit status in red, and a red >, after a failed command
@@ -34,7 +34,8 @@ __smp_dir() {
   local p=${PWD/#$HOME/\~} n
   local -a parts
   IFS=/ read -ra parts <<< "$p"; n=${#parts[@]}
-  if (( n > 3 )) && [[ $p != / ]]; then printf '.../%s/%s/%s' "${parts[n-3]}" "${parts[n-2]}" "${parts[n-1]}"
+  # "" or "~" first, then the levels: past three, keep the last three.
+  if (( n > 4 )); then printf '.../%s/%s/%s' "${parts[n-3]}" "${parts[n-2]}" "${parts[n-1]}"
   else printf '%s' "$p"; fi
 }
 

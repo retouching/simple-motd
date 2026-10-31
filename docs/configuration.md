@@ -6,9 +6,11 @@
 THEME=pink        # pink, blue, green or orange (the screen and the prompt)
 SSH_MODE=journal  # journal, private or off
 WIDTH=66          # width of the header line, in columns
+DISKS=""          # mount points in the usage part; empty: every local data file system
+MAX_DISKS=6       # at most this many disk lines, the others counted on one line
 ```
 
-`THEME` and `WIDTH` apply at the next login. `SSH_MODE` changes what sshd does in `private` mode: switch it with `sudo ./install.sh --ssh <mode>` rather than by hand.
+`THEME`, `WIDTH`, `DISKS` and `MAX_DISKS` apply at the next login. `SSH_MODE` changes what sshd does in `private` mode: switch it with `sudo ./install.sh --ssh <mode>` rather than by hand.
 
 ## Themes
 

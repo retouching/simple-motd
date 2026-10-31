@@ -10,7 +10,7 @@
   <img alt="Debian, Ubuntu, Fedora, Arch" src="https://img.shields.io/badge/runs%20on-Debian%20%7C%20Ubuntu%20%7C%20Fedora%20%7C%20Arch-E95420.svg">
 </p>
 
-simple-motd replaces the login messages of a Debian, Ubuntu, Fedora or Arch server with one screen in three parts: **system** (OS, uptime, CPU, RAM, GPU), **usage** (load, CPU, memory, VRAM, swap and disk, as bars) and **security** (pending updates, security ones apart, and the SSH logins that worked and failed over the last 24 hours). A systemd timer gathers the slow values every minute, so the screen prints in a few milliseconds. It is plain shell with ASCII symbols only, and works whatever the login shell: bash, zsh or sh: no font, no runtime, nothing to keep up to date besides the repository.
+simple-motd replaces the login messages of a Debian, Ubuntu, Fedora or Arch server with one screen in three parts: **system** (OS, uptime, CPU, RAM, disks, GPUs), **usage** (load, CPU, memory, VRAM, swap and each file system, as bars) and **security** (pending updates, security ones apart, and the SSH logins that worked and failed over the last 24 hours). A systemd timer gathers the slow values every minute, so the screen prints in a few milliseconds. It is plain shell with ASCII symbols only, and works whatever the login shell: bash, zsh or sh: no font, no runtime, nothing to keep up to date besides the repository.
 
 ## Screenshots
 
@@ -43,7 +43,8 @@ The values come from a sample machine. How to make them again: [CONTRIBUTING.md]
   - `journal` (default): read from the journal of the sshd unit, or from `/var/log/auth.log` / `/var/log/secure` when the journal is not kept; sshd is left as it is.
   - `private`: sshd logs only to a file in RAM that simple-motd empties every minute, and nothing about SSH reaches the journal or the disk.
   - `off`: no SSH line.
-- **Hardware details** where the machine gives them: DDR type, speed and modules from `dmidecode`, GPU and VRAM from `lspci`, `nvidia-smi` or amdgpu; a virtual machine is marked as such.
+- **Hardware details** where the machine gives them: DDR type, speed and modules from `dmidecode`; every physical disk (NVMe, SSD, HDD, model) from `lsblk`; every GPU with its VRAM from `lspci`, `nvidia-smi` or amdgpu; a virtual machine is marked as such.
+- **Every file system** in the usage part, one bar each with its mount point, without Docker, snap or `/boot` (or the ones you list).
 - **Four themes**: pink, blue, green, orange, picked at install time from a preview, changed later with `simple-motd theme <name>`.
 - **Optional prompt** (`root ~ >`) for bash, zsh and POSIX sh (dash, ash, ksh), the same in all three, in the colours of the theme: directory, git branch read from `.git/HEAD` (git is never run), exit status in red after a failure.
 - **Clean install**: one script, run again to change options, `--dry-run` to see what it would do; every file it replaces is copied first, and `uninstall.sh` gives the system back as it was.

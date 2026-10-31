@@ -14,12 +14,13 @@ When the cache is more than five minutes old, the screen says so under the secur
 | uptime | `/proc/uptime` |
 | cpu (system) | `/proc/cpuinfo` (model, average frequency), `lscpu` (cores), `nproc` (threads), `systemd-detect-virt` |
 | ram | `dmidecode -t memory`: total, DDR type, configured speed, modules used out of slots, maker; virtual machines rarely give more than the size |
-| gpu | `lspci` (first VGA, 3D or display controller), and its size of VRAM |
+| disk (system) | `lsblk -d`: one line per physical disk (size, NVMe, SSD, HDD or virtual, USB, model); no partition, LVM or RAID volume, loop device, zram or optical drive |
+| gpu | `lspci`: one line per VGA, 3D or display controller (integrated and discrete), with its size of VRAM |
 | load | `/proc/loadavg`, as a share of the threads |
 | cpu (usage) | `/proc/stat`, average over the last minute (between two runs of the timer) |
 | memory, swap | `/proc/meminfo` (used = total minus available) |
-| vram | `nvidia-smi`, or `mem_info_vram_*` of amdgpu; shown only when the card tells its use |
-| disk | `df` of `/` |
+| vram | `nvidia-smi` (matched to the card by its PCI address), or `mem_info_vram_*` of amdgpu; one line per card that tells its use, named after it when there are several |
+| disk (usage) | `df -l`: `/` first, then every local data file system (ext4, xfs, btrfs, zfs, f2fs, bcachefs, ntfs, exfat...) by path, each device once (btrfs subvolumes, bind mounts, the datasets of one ZFS pool); never Docker, snap, `/boot`, `/run` or network mounts. `DISKS` picks them by hand |
 | updates | below |
 | ssh | below |
 
@@ -40,7 +41,7 @@ Each one is stored as `<time> ok` or `<time> fail` in `/var/lib/simple-motd/ssh-
 
 ### journal (default)
 
-sshd is left as it is. simple-motd reads the journal of the sshd unit (`ssh.service` or `sshd.service`) from where it stopped the previous minute (a saved cursor), going back 24 hours on the first run. When the journal keeps nothing for the unit (no persistent or volatile journal), it reads `/var/log/auth.log` (Debian, Ubuntu with rsyslog) or `/var/log/secure` (Fedora with rsyslog) from a saved offset, starting at the end of the file on the first run and from the top after a rotation.
+sshd is left as it is. simple-motd reads the journal of the sshd unit (`ssh.service` or `sshd.service`) from where it stopped the previous minute (a saved cursor), going back 24 hours on the first run. When the journal keeps nothing for the unit (`Storage=none`, or not a single entry for it), it reads `/var/log/auth.log` (Debian, Ubuntu with rsyslog) or `/var/log/secure` (Fedora with rsyslog) from a saved offset, starting at the end of the file on the first run and from the top after a rotation.
 
 The addresses stay in the system's logs as before: simple-motd only reads them. If sshd runs with `LogLevel QUIET` (or lower), there is nothing to count and the line says so.
 

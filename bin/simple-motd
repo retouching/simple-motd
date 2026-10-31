@@ -9,7 +9,7 @@
 set -u
 shopt -s extglob
 
-VERSION=0.4.0
+VERSION=0.4.1
 CONF=${SIMPLE_MOTD_CONF:-/etc/simple-motd.conf}
 RUN_DIR=${SIMPLE_MOTD_RUN:-/run/simple-motd}
 LIB_DIR=${SIMPLE_MOTD_LIB:-/var/lib/simple-motd}

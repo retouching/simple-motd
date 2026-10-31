@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- The line of dashes around `user@host` takes the whole width of the terminal, and a second one closes the screen at the bottom (`WIDTH` when the width is unknown).
+
 ## 0.4.0
 
 - Local terminals: `install.sh --local` shows the screen in every new tab or window of Konsole, GNOME Terminal, kitty... (once per terminal, not in subshells, tmux, IDE terminals or after `sudo -s`); `SHOW` in the configuration, and per user in `~/.config/simple-motd.conf` (with `THEME`).

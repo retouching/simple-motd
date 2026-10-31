@@ -22,7 +22,11 @@ SSH_MODE=journal
 WIDTH=66
 DISKS=""        # mount points to show; empty: every local data file system
 MAX_DISKS=6
+DOCKER=auto
+# SHOW is read by /etc/profile.d/simple-motd.sh, not here.
 [[ -r $CONF ]] && . "$CONF"
+# One user's own THEME (and SHOW, read by /etc/profile.d/simple-motd.sh).
+[[ $EUID -ne 0 && -r ${HOME-}/.config/simple-motd.conf ]] && . "$HOME/.config/simple-motd.conf"
 THEME=${SIMPLE_MOTD_THEME:-$THEME}   # one-off override (install.sh previews)
 
 # ---------------------------------------------------------------------------
@@ -270,6 +274,31 @@ collect_cpu_busy() {
   echo "$tot $idle" > "$RUN_DIR/cpu.prev"
 }
 
+# Docker: version, swarm, containers, images, volumes, networks, stacks. Each call has a timeout,
+# so a stuck daemon never holds the timer.
+collect_docker() {
+  docker_state=none
+  [[ $DOCKER == off ]] && return
+  command -v docker >/dev/null 2>&1 || return
+  local info
+  info=$(timeout 10 docker info --format '{{.ServerVersion}}|{{.Swarm.LocalNodeState}}|{{.Swarm.ControlAvailable}}|{{.Swarm.Nodes}}|{{.ContainersRunning}}|{{.ContainersStopped}}|{{.ContainersPaused}}|{{.Images}}' 2>/dev/null)
+  if [[ -z $info || $info != *"|"* ]]; then docker_state=down; return; fi
+  docker_state=up
+  IFS='|' read -r d_version d_swarm d_manager d_nodes d_running d_stopped d_paused d_images <<< "$info"
+  d_version=${d_version%%[+~]*}
+  d_volumes=$(timeout 10 docker volume ls -q 2>/dev/null | grep -c .)
+  d_networks=$(timeout 10 docker network ls -q 2>/dev/null | grep -c .)
+  d_unhealthy=$(timeout 10 docker ps -q --filter health=unhealthy 2>/dev/null | grep -c .)
+  # Stacks: docker stack ls on a swarm manager; elsewhere the compose projects.
+  if [[ $d_swarm == active && $d_manager == true ]]; then
+    d_stack_kind=swarm
+    d_stacks=$(timeout 10 docker stack ls --format '{{.Name}}' 2>/dev/null | grep -c .)
+  else
+    d_stack_kind=compose
+    d_stacks=$(timeout 10 docker ps -a --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null | sort -u | grep -c .)
+  fi
+}
+
 cmd_collect() {
   [[ $EUID -eq 0 ]] || { echo "simple-motd collect: must run as root" >&2; return 1; }
   umask 022; mkdir -p "$RUN_DIR" "$LIB_DIR"; chmod 700 "$LIB_DIR"
@@ -277,7 +306,7 @@ cmd_collect() {
   exec 9> "$RUN_DIR/.lock"
   flock -w 30 9 || { echo "simple-motd collect: another run holds the lock" >&2; return 1; }
   now=$(date +%s)
-  collect_system; collect_cpu_busy; collect_updates; collect_ssh
+  collect_system; collect_cpu_busy; collect_updates; collect_ssh; collect_docker
   local tmp; tmp=$(mktemp "$RUN_DIR/.state.XXXXXX")
   {
     echo "os=$(q "$os")"; echo "cpu=$(q "$cpu")"; echo "ncpu=$ncpu"
@@ -286,6 +315,14 @@ cmd_collect() {
     echo "vram_total=$(qa "${vram_total[@]}")"; echo "vram_used=$(qa "${vram_used[@]}")"
     echo "pm=$pm"; echo "upd=$upd"; echo "sec=$sec"; echo "last_run=$(q "$last_run")"
     echo "ssh_source=$ssh_source"; echo "ssh_ok=$ssh_ok"; echo "ssh_fail=$ssh_fail"
+    echo "docker_state=$docker_state"
+    if [[ $docker_state == up ]]; then
+      echo "d_version=$(q "$d_version")"; echo "d_swarm=$(q "$d_swarm")"; echo "d_manager=$(q "$d_manager")"
+      echo "d_nodes=${d_nodes:-0}"; echo "d_running=${d_running:-0}"; echo "d_stopped=${d_stopped:-0}"
+      echo "d_paused=${d_paused:-0}"; echo "d_unhealthy=${d_unhealthy:-0}"; echo "d_images=${d_images:-0}"
+      echo "d_volumes=${d_volumes:-0}"; echo "d_networks=${d_networks:-0}"
+      echo "d_stacks=${d_stacks:-0}"; echo "d_stack_kind=$d_stack_kind"
+    fi
     echo "stamp=$now"
   } > "$tmp"
   chmod 644 "$tmp"; mv -f "$tmp" "$RUN_DIR/state"
@@ -325,7 +362,9 @@ cmd_show() {
   # Values from the cache (defaults first, the file may be missing).
   local os="" cpu="" ncpu="" ram="" cpu_busy="" pm="" upd=0 sec=0
   local -a drives=() gpus=() gpu_short=() vram_total=() vram_used=() demo_disks=()
-  local last_run="" ssh_source=off ssh_ok=0 ssh_fail=0 stamp=0
+  local last_run="" ssh_source=off ssh_ok=0 ssh_fail=0 stamp=0 docker_state=none
+  local d_version="" d_swarm="" d_manager="" d_nodes=0 d_running=0 d_stopped=0 d_paused=0 d_unhealthy=0
+  local d_images=0 d_volumes=0 d_networks=0 d_stacks=0 d_stack_kind=""
   # demo_* values replace the live ones: only set by share/demo/state, for the previews.
   local demo_uptime="" demo_load="" demo_mem="" demo_swap=""
   [[ -r $state ]] && . "$state"
@@ -335,9 +374,32 @@ cmd_show() {
   local E=$'\e[' R=$'\e[0m' B=$'\e[1m'
   local ACC="${E}38;5;${a}m" TTL="${E}1;38;5;${h}m" LBL="${E}38;5;${l}m" TXT="${E}38;5;255m"
   local DIM="${E}38;5;244m" TRK="${E}38;5;238m" OK="${E}38;5;156m" WARN="${E}38;5;222m" BAD="${E}38;5;203m"
-  local W=$WIDTH BAR=24 SEP=" ${E}38;5;244m|${E}0m "
+  local W=$WIDTH BAR=24 SEP=" ${E}38;5;244m|${E}0m " COLS=0
+  # A narrow terminal: the header, the bars and every line fit its width.
+  if [[ -t 1 ]]; then COLS=$(stty size 2>/dev/null < /dev/tty | awk '{print $2}'); fi
+  [[ ${COLS:-0} =~ ^[0-9]+$ && $COLS -gt 0 ]] || COLS=${COLUMNS:-0}
+  [[ $COLS =~ ^[0-9]+$ ]] || COLS=0
+  if (( COLS > 0 )); then
+    (( COLS < W )) && W=$COLS
+    BAR=$(( COLS - 52 )); (( BAR > 24 )) && BAR=24; (( BAR < 6 )) && BAR=6
+  fi
 
-  row() { printf '  %s*%s %s%-9s%s %s\n' "$ACC" "$R" "$LBL" "$1" "$R" "$2"; }
+  fit() { # cut a coloured line to COLS visible characters
+    local s=$1 plain out="" c n=0 i=0
+    plain=${s//$'\e'\[*([0-9;])m/}
+    if (( COLS == 0 || ${#plain} <= COLS )); then printf '%s\n' "$s"; return; fi
+    while (( i < ${#s} )); do
+      c=${s:i:1}
+      if [[ $c == $'\e' ]]; then
+        local rest=${s:i}; local esc=${rest%%m*}m
+        out+=$esc; i=$((i + ${#esc})); continue
+      fi
+      (( n >= COLS - 3 )) && break
+      out+=$c; n=$((n + 1)); i=$((i + 1))
+    done
+    printf '%s...%s\n' "$out" "$R"
+  }
+  row() { fit "$(printf '  %s*%s %s%-10s%s %s' "$ACC" "$R" "$LBL" "$1" "$R" "$2")"; }
   fmt() { local s=${1// | /$SEP}; printf '%s' "$TXT$s$R"; }
   bar() {
     local p=${1%.*} f c=$ACC x y
@@ -357,7 +419,8 @@ cmd_show() {
   (( left < 0 )) && left=0; (( right < 0 )) && right=0
   dl=$(printf '%*s' "$left" ''); dr=$(printf '%*s' "$right" '')
   echo
-  printf '%s%s%s %s%s%s@%s%s %s%s%s%s\n\n' "$TRK" "${dl// /-}" "$R" "$TXT$B" "$user" "$ACC" "$TXT$B" "$host" "$R" "$TRK" "${dr// /-}" "$R"
+  fit "$(printf '%s%s%s %s%s%s@%s%s %s%s%s%s' "$TRK" "${dl// /-}" "$R" "$TXT$B" "$user" "$ACC" "$TXT$B" "$host" "$R" "$TRK" "${dr// /-}" "$R")"
+  echo
 
   # system
   printf '%s%s%s\n' "$TTL" system "$R"
@@ -429,6 +492,32 @@ cmd_show() {
     *) local fc=$OK; (( ssh_fail )) && fc=$BAD
        row ssh "$OK$ssh_ok ok$R$SEP$fc$ssh_fail failed$R ${DIM}(last 24h)$R" ;;
   esac
+  # docker
+  if [[ $docker_state != none ]]; then
+    echo
+    printf '%s%s%s\n' "$TTL" docker "$R"
+    if [[ $docker_state == down ]]; then row engine "${BAD}not running$R ${DIM}(or not reachable)$R"
+    else
+      local sw
+      case $d_swarm in
+        active) if [[ $d_manager == true ]]; then sw="${OK}swarm manager$R$SEP$TXT$d_nodes node$( ((d_nodes > 1)) && echo s)$R"
+                else sw="${OK}swarm worker$R"; fi ;;
+        pending|error|locked) sw="${WARN}swarm $d_swarm$R" ;;
+        *) sw="${DIM}swarm inactive$R" ;;
+      esac
+      row engine "$TXT$d_version$R$SEP$sw"
+      local ct="$TXT$d_running running$R$SEP$TXT$d_stopped stopped$R"
+      (( d_paused )) && ct+="$SEP$WARN$d_paused paused$R"
+      (( d_unhealthy )) && ct+="$SEP$BAD$B$d_unhealthy unhealthy$R"
+      row containers "$ct"
+      row images "$TXT$d_images$R"
+      row volumes "$TXT$d_volumes$R"
+      row networks "$TXT$d_networks$R"
+      if [[ $d_stack_kind == swarm ]]; then row stacks "$TXT$d_stacks$R"
+      else row stacks "$TXT$d_stacks$R ${DIM}(compose projects)$R"; fi
+    fi
+  fi
+
   local age=$((now - stamp))
   if [[ ! -r $state ]]; then printf '    %sno cache yet: is simple-motd-collect.timer running?%s\n' "$DIM" "$R"
   elif (( age > 300 )); then printf '    %scache %s min old: is simple-motd-collect.timer running?%s\n' "$DIM" "$((age / 60))" "$R"; fi

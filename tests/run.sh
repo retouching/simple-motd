@@ -51,9 +51,11 @@ for d in "${distros[@]}"; do
   check "install (journal, prompt, replace-motd)" grep -q "done. The screen" <<< "$out"
   check "timer active" x 'systemctl is-active -q simple-motd-collect.timer'
   check "lspci and dmidecode installed" x 'command -v lspci && { [ "$(uname -m)" != x86_64 ] || command -v dmidecode; }'
-  screen=$(login | sed 's/\x1b\[[0-9;]*m//g')
+  screen=$(login | tr -d '\r' | sed 's/\x1b\[[0-9;]*m//g')
   check "screen shown at SSH login" grep -q "security" <<< "$screen"
   check "header with user@host" grep -qE -- "-+ .*root.*@" <<< "$screen"
+  check "dashes at the bottom, as wide as the header" bash -c 'h=$(grep -m1 -E "^-+ .*@.* -+$" <<< "$1"); b=$(grep -E "^-+$" <<< "$1" | tail -1); [ -n "$b" ] && [ ${#h} -eq ${#b} ]' _ "$screen"
+  check "dashes span the terminal (COLUMNS=100)" x 'COLUMNS=100 simple-motd show | sed "s/\x1b\[[0-9;]*m//g" | grep -E "^-+$" | awk "length != 100 {exit 1}"'
   check "no system motd left" bash -c '! grep -qiE "programs included|Welcome to Ubuntu|Documentation:" <<< "$1"' _ "$screen"
   check "screen is ASCII only" bash -c '! LC_ALL=C grep -qP "[^\x00-\x7F]" <<< "$1"' _ "$screen"
   bad

@@ -31,6 +31,7 @@ q() { printf '%q' "$1"; }
 pkg_manager() {
   if command -v apt-get >/dev/null 2>&1 && [[ -d /var/lib/dpkg ]]; then echo apt
   elif command -v dnf >/dev/null 2>&1; then echo dnf
+  elif command -v pacman >/dev/null 2>&1; then echo pacman
   else echo none; fi
 }
 
@@ -41,6 +42,7 @@ pkg_signature() {
   case $1 in
     apt) files=(/var/lib/dpkg/status /var/lib/apt/lists /var/lib/apt/extended_states) ;;
     dnf) files=(/var/lib/rpm /usr/lib/sysimage/rpm /var/cache/libdnf5 /var/cache/dnf) ;;
+    pacman) files=(/var/lib/pacman/local /var/lib/pacman/sync) ;;
   esac
   for f in "${files[@]}"; do [[ -e $f ]] && stat -c '%Y' "$f"; done | paste -sd. -
 }
@@ -67,6 +69,19 @@ collect_updates_dnf() {
   [[ -n $t ]] && last_run=$(date -d "@$t" +%F)
 }
 
+collect_updates_pacman() {
+  local list
+  # checkupdates (pacman-contrib) syncs a copy of the databases, so the system's stay as they
+  # are (no partial upgrade); it is the only package manager query that goes to the network,
+  # at most every 6 hours. Without it, the local databases (as old as the last pacman -Sy).
+  if command -v checkupdates >/dev/null 2>&1; then list=$(checkupdates 2>/dev/null)
+  else list=$(pacman -Qu 2>/dev/null); fi
+  upd=$(grep -c . <<< "$list")
+  # Security: arch-audit (if installed) lists the installed packages with a fixed vulnerability.
+  if command -v arch-audit >/dev/null 2>&1; then sec=$(arch-audit -u -q 2>/dev/null | grep -c .); else sec=0; fi
+  last_run=$(grep -h 'transaction completed' /var/log/pacman.log 2>/dev/null | tail -1 | sed -nE 's/^\[([0-9]{4}-[0-9]{2}-[0-9]{2}).*/\1/p')
+}
+
 collect_updates() {
   local sig cache=$RUN_DIR/updates
   pm=$(pkg_manager); sig=$(pkg_signature "$pm")
@@ -79,6 +94,7 @@ collect_updates() {
   case $pm in
     apt) collect_updates_apt ;;
     dnf) collect_updates_dnf ;;
+    pacman) collect_updates_pacman ;;
   esac
   { echo "c_sig=$(q "$sig")"; echo "c_time=$now"; echo "pm=$pm"
     echo "upd=${upd:-0}"; echo "sec=${sec:-0}"; echo "last_run=$(q "${last_run:-}")"; } > "$cache.tmp"
@@ -162,7 +178,7 @@ collect_ssh() {
   ssh_ok=$(grep -c ' ok$' "$ev"); ssh_fail=$(grep -c ' fail$' "$ev")
   # sshd silenced (LogLevel QUIET, SILENT, FATAL or ERROR): nothing can be counted.
   local lvl
-  lvl=$(sshd -T 2>/dev/null | awk '$1=="loglevel"{print toupper($2)}')
+  lvl=$(sshd -T 2>/dev/null | awk 'tolower($1)=="loglevel"{print toupper($2)}')
   case $lvl in QUIET|SILENT|FATAL|ERROR) ssh_source=silenced ;; esac
 }
 
@@ -344,7 +360,7 @@ cmd_show() {
   # security
   printf '%s%s%s\n' "$TTL" security "$R"
   local u
-  if [[ $pm == none || -z $pm ]]; then u="${DIM}no apt or dnf$R"
+  if [[ $pm == none || -z $pm ]]; then u="${DIM}no apt, dnf or pacman$R"
   elif (( upd == 0 )); then u="${OK}up to date$R"
   else u="${WARN}$upd pending$R"; (( sec )) && u+="$SEP${BAD}${B}$sec security$R"; fi
   [[ -n $last_run ]] && u+="$SEP${DIM}last $pm run $last_run$R"
